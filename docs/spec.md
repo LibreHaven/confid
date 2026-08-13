@@ -79,19 +79,13 @@ p2p-chat-system/
 ## Code Style
 
 - TypeScript `strict: true` + `noUncheckedIndexedAccess`；禁止 `any`（例外需注释理由）
-- 魔数禁止：具名常量 + 注释（如 `const MAX_MESSAGE_BYTES = 16 * 1024`）
 - React：函数组件 + hooks；无类组件
-- **UI 交互状态建议用显式状态机表达**（`useReducer` + 命名状态/事件），以适配项目实际为准，不强求：
-```ts
-type SessionState =
-  | { phase: 'idle' }
-  | { phase: 'creating' }
-  | { phase: 'waiting'; inviteUrl: string }      // 已创建，等对方加入
-  | { phase: 'handshaking' }                     // SDP/ICE 交换中
-  | { phase: 'verifying'; remoteFingerprint: string }  // 等待指纹确认
-  | { phase: 'active'; fingerprint: string }     // 已确认，可聊天
-  | { phase: 'closed'; reason: string }
-```
+- 开发惯例：
+  - **p2p 连接生命周期**（creating → waiting → handshaking → verifying → active / failed / closed，含超时与重连）用显式状态机建模：命名状态 + 事件 + 守卫 + 失败恢复（协议正确性要求）
+  - **UI 交互状态**：产出 Interaction Contract（状态/事件/转换表，可很小），实现机制按复杂度选（useState/useReducer/库），不一律状态机化
+  - 禁魔数（具名常量 + 注释）
+  - 加密/握手/协议代码先写测试（TDD）
+  - 提交前 build/test/lint/vet 全绿
 - Go：标准库优先；错误必须处理（不吞错）；无全局可变状态（hub 由 server 持有）
 - commit message：英文单行标题，conventional 前缀（`feat:`/`fix:`/`refactor:`）
 
