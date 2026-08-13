@@ -1,4 +1,4 @@
-# Spec: LibreHaven Secure Chat — MVP（零留存 P2P 私密聊天）
+# Spec: Confid — MVP（零留存 P2P 私密聊天）
 
 > 版本 0.1 · 2026-08-13 · 状态：待审批
 
@@ -81,7 +81,7 @@ p2p-chat-system/
 - TypeScript `strict: true` + `noUncheckedIndexedAccess`；禁止 `any`（例外需注释理由）
 - 魔数禁止：具名常量 + 注释（如 `const MAX_MESSAGE_BYTES = 16 * 1024`）
 - React：函数组件 + hooks；无类组件
-- **UI 交互状态一律用显式状态机表达**（`useReducer` + 命名状态/事件），不用散落的 `useState(boolean)`——这是本项目开发惯例：
+- **UI 交互状态建议用显式状态机表达**（`useReducer` + 命名状态/事件），以适配项目实际为准，不强求：
 ```ts
 type SessionState =
   | { phase: 'idle' }
@@ -108,7 +108,7 @@ type SessionState =
 
 ## Boundaries
 
-- **Always**：提交前 `npm run build` + `npm test` + `npm run lint` + `go test ./...` 全绿；加密代码先写测试；UI 状态变更先更新状态机定义
+- **Always**：提交前 `npm run build` + `npm test` + `npm run lint` + `go test ./...` 全绿；加密代码先写测试
 - **Ask first**：新增第三方依赖；信令协议字段变更；任何触碰"零留存"承诺的改动（持久化、日志、消息内容处理）；CI 配置；部署架构
 - **Never**：提交密钥/凭据；信令服务器持久化或记录消息内容；删除/禁用测试；向公开仓库写入本机路径、用户名、工作流文件名（PROJECT-CONTEXT.md、tasks/）
 
