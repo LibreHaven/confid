@@ -34,8 +34,9 @@ export interface SignalingEvents {
   onClose(): void;
 }
 
-// WS_OPEN mirrors WebSocket.OPEN (1); kept as a local constant because
+// WS_OPEN / WS_CONNECTING mirror WebSocket constants; kept local because
 // jsdom test environments do not provide a global WebSocket.
+const WS_CONNECTING = 0;
 const WS_OPEN = 1;
 
 /** Serialize an outbound message to the wire format. */
@@ -70,17 +71,23 @@ export function decodeSignal(raw: string): SignalingMessage {
  */
 export class SignalingClient {
   private ws: WebSocket | null = null;
+  private pending: string[] = [];
 
   constructor(
     private readonly url: string,
     private readonly events: SignalingEvents,
-    private readonly socketFactory: (url: string) => WebSocket = (u) =>
-      new WebSocket(u),
+    private readonly socketFactory: (url: string) => WebSocket = (u) => new WebSocket(u),
   ) {}
 
   connect(): void {
     const ws = this.socketFactory(this.url);
     this.ws = ws;
+    ws.onopen = () => {
+      for (const raw of this.pending) {
+        ws.send(raw);
+      }
+      this.pending = [];
+    };
     ws.onmessage = (e) => this.handleMessage(String(e.data));
     ws.onclose = () => this.events.onClose();
     ws.onerror = () => ws.close();
@@ -103,10 +110,20 @@ export class SignalingClient {
   }
 
   private send(raw: string): void {
-    if (!this.ws || this.ws.readyState !== WS_OPEN) {
+    if (!this.ws) {
       throw new Error('signaling: not connected');
     }
-    this.ws.send(raw);
+    if (this.ws.readyState === WS_OPEN) {
+      this.ws.send(raw);
+      return;
+    }
+    if (this.ws.readyState === WS_CONNECTING) {
+      // Buffer commands issued before the socket opens (create/join are
+      // fired immediately after connect()).
+      this.pending.push(raw);
+      return;
+    }
+    throw new Error('signaling: not connected');
   }
 
   private handleMessage(raw: string): void {

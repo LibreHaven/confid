@@ -13,8 +13,7 @@ import {
 class MockPeerConnection {
   static instances: MockPeerConnection[] = [];
   connectionState: RTCPeerConnectionState = 'new';
-  onicecandidate: ((e: { candidate: RTCIceCandidate | null }) => void) | null =
-    null;
+  onicecandidate: ((e: { candidate: RTCIceCandidate | null }) => void) | null = null;
   onconnectionstatechange: (() => void) | null = null;
   ondatachannel: ((e: { channel: RTCDataChannel }) => void) | null = null;
   iceServers: RTCIceServer[] = [];
@@ -50,9 +49,7 @@ describe('createPeerConnection', () => {
       onStateChange: vi.fn(),
     });
     const pc = MockPeerConnection.instances[0]!;
-    expect(pc.iceServers).toEqual([
-      { urls: 'stun:stun.l.google.com:19302' },
-    ]);
+    expect(pc.iceServers).toEqual([{ urls: 'stun:stun.l.google.com:19302' }]);
   });
 
   it('forwards real ICE candidates and drops null end-of-candidates', () => {

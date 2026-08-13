@@ -2,9 +2,6 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 import {
   ERR_ROOM_FULL,
   ERR_ROOM_NOT_FOUND,
-  MSG_CREATED,
-  MSG_JOINED,
-  MSG_PEER_LEFT,
   MSG_SIGNAL,
   SignalingClient,
   decodeSignal,
@@ -39,8 +36,9 @@ describe('codec', () => {
 class FakeWebSocket {
   static OPEN = 1;
   static instances: FakeWebSocket[] = [];
-  readyState = 1;
+  readyState = 0; // CONNECTING until open() is called
   sent: string[] = [];
+  onopen: (() => void) | null = null;
   onmessage: ((e: { data: string }) => void) | null = null;
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
@@ -54,6 +52,11 @@ class FakeWebSocket {
 
   constructor(_url: string) {
     FakeWebSocket.instances.push(this);
+  }
+
+  open() {
+    this.readyState = 1;
+    this.onopen?.();
   }
 
   receive(raw: string) {
@@ -77,6 +80,7 @@ function makeClient() {
   );
   client.connect();
   const ws = FakeWebSocket.instances[0]!;
+  ws.open();
   return { client, ws, events };
 }
 
@@ -110,7 +114,7 @@ describe('SignalingClient', () => {
   });
 
   it('forwards peer_left and error codes', () => {
-    const { client, ws, events } = makeClient();
+    const { ws, events } = makeClient();
     ws.receive('{"type":"peer_left"}');
     expect(events.onPeerLeft).toHaveBeenCalled();
     ws.receive('{"type":"error","code":"room_full"}');
@@ -133,9 +137,35 @@ describe('SignalingClient', () => {
     expect(() => client.createRoom()).toThrow('not connected');
   });
 
+  it('buffers commands until the socket opens, then flushes in order', () => {
+    const events = {
+      onCreated: vi.fn(),
+      onJoined: vi.fn(),
+      onSignal: vi.fn(),
+      onPeerLeft: vi.fn(),
+      onError: vi.fn(),
+      onClose: vi.fn(),
+    };
+    const client = new SignalingClient(
+      'ws://localhost',
+      events,
+      (u) => new FakeWebSocket(u) as unknown as WebSocket,
+    );
+    client.connect();
+    const ws = FakeWebSocket.instances[0]!;
+    // Socket still CONNECTING: commands must buffer, not throw.
+    client.createRoom();
+    client.sendSignal({ kind: 'ice', candidate: 'c:0' });
+    expect(ws.sent).toEqual([]);
+    ws.open();
+    expect(ws.sent).toEqual([
+      '{"type":"create"}',
+      '{"type":"signal","payload":{"kind":"ice","candidate":"c:0"}}',
+    ]);
+  });
+
   it('joined is forwarded with roomId', () => {
-    const { client, ws, events } = makeClient();
-    client.joinRoom('zzz999');
+    const { ws, events } = makeClient();
     ws.receive('{"type":"joined","roomId":"zzz999"}');
     expect(events.onJoined).toHaveBeenCalledWith('zzz999');
   });
