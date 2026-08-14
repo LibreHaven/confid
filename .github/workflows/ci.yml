@@ -35,10 +35,11 @@ jobs:
       run:
         working-directory: signaling
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: signaling/go.mod
+          cache-dependency-path: signaling/go.sum
           cache: true
       - run: go vet ./...
       - run: go test ./...
@@ -56,9 +57,10 @@ jobs:
           cache-dependency-path: |
             client/package-lock.json
             e2e/package-lock.json
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: signaling/go.mod
+          cache-dependency-path: signaling/go.sum
           cache: true
       # The Playwright webServer boots both services itself; client deps
       # must exist for `npm run dev` and Go modules for `go run`.
