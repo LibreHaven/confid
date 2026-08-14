@@ -65,6 +65,7 @@ type client struct {
 	send chan protocol.Message
 	hub  *hub.Hub
 	room *hub.Room
+	addr string
 }
 
 func (c *client) Send(msg protocol.Message) error {
@@ -81,7 +82,7 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	c := &client{conn: conn, send: make(chan protocol.Message, sendBuffer), hub: s.hub}
+	c := &client{conn: conn, send: make(chan protocol.Message, sendBuffer), hub: s.hub, addr: r.RemoteAddr}
 	log.Printf("ws: connect from %s", r.RemoteAddr)
 	go c.writeLoop()
 	c.readLoop()
@@ -91,9 +92,13 @@ func (c *client) readLoop() {
 	defer func() {
 		c.conn.Close()
 		if other := c.hub.Leave(c); other != nil {
-			other.Send(protocol.New(protocol.TypePeerLeft, "", "", nil))
+			if err := other.Send(protocol.New(protocol.TypePeerLeft, "", "", nil)); err != nil {
+				log.Printf("ws: peer_left send failed to %s: %v", c.addr, err)
+			} else {
+				log.Printf("ws: peer_left sent to %s (room left by %s)", c.addr, c.addr)
+			}
 		}
-		log.Printf("ws: disconnect")
+		log.Printf("ws: disconnect %s", c.addr)
 	}()
 	c.conn.SetReadLimit(maxMessageBytes)
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -104,6 +109,7 @@ func (c *client) readLoop() {
 	for {
 		_, raw, err := c.conn.ReadMessage()
 		if err != nil {
+			log.Printf("ws: read error from %s: %v", c.addr, err)
 			return
 		}
 		var msg protocol.Message
@@ -158,6 +164,7 @@ func (c *client) writeLoop() {
 				return
 			}
 			if err := c.conn.WriteJSON(msg); err != nil {
+				log.Printf("ws: write error to %s: %v", c.addr, err)
 				return
 			}
 		case <-ticker.C:

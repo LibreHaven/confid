@@ -21,6 +21,9 @@ coverage/
 test-results/
 playwright-report/
 
+# QA artifacts
+dogfood-output/
+
 # Editor / OS
 .DS_Store
 Thumbs.db

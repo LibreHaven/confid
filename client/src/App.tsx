@@ -11,16 +11,25 @@ import type { SessionState } from './features/session/sessionMachine';
 
 export default function App() {
   const { state, messages, localFingerprint, actions } = useSession();
-  const { joinRoom } = actions;
+  const { joinRoom, retry } = actions;
 
-  // Auto-join when the app opens on an invite link (#/join/<roomId>).
+  // Join on invite links (#/join/<roomId>), including hash navigation to a
+  // NEW link from a finished session in the same tab.
   useEffect(() => {
-    const match = window.location.hash.match(/#\/join\/([0-9a-z]+)/);
-    if (match && match[1]) {
-      window.history.replaceState(null, '', window.location.pathname);
-      void joinRoom(match[1]);
-    }
-  }, [joinRoom]);
+    const tryJoinFromHash = () => {
+      const match = window.location.hash.match(/#\/join\/([0-9a-z]+)/);
+      if (match && match[1]) {
+        window.history.replaceState(null, '', window.location.pathname);
+        if (state.phase === 'failed' || state.phase === 'closed') {
+          retry(); // terminal states must reset before joining again
+        }
+        void joinRoom(match[1]);
+      }
+    };
+    tryJoinFromHash();
+    window.addEventListener('hashchange', tryJoinFromHash);
+    return () => window.removeEventListener('hashchange', tryJoinFromHash);
+  }, [joinRoom, retry, state.phase]);
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-950 p-4 text-slate-100">

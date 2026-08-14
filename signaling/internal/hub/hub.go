@@ -61,8 +61,16 @@ func (r *Room) Remove(p Peer) Peer {
 		if r.peers[i] == p {
 			r.peers[i] = r.peers[r.count-1]
 			r.count--
-			other := r.otherLocked(i)
-			return other
+			// The remaining peer (if any) sits in peers[:count]. Find the
+			// first entry that is NOT the removed peer. (Can't use
+			// otherLocked(i): after the swap, the surviving peer may have
+			// been moved INTO slot i and would be excluded by it.)
+			for j := 0; j < r.count; j++ {
+				if r.peers[j] != p {
+					return r.peers[j]
+				}
+			}
+			return nil
 		}
 	}
 	return nil
