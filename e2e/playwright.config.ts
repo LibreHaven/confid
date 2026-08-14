@@ -7,9 +7,10 @@ export default defineConfig({
   use: {
     baseURL: 'http://localhost:5173',
     trace: 'retain-on-failure',
-    // Use the system Edge browser (Playwright's bundled headless shell
-    // download is unreliable on this network).
-    channel: 'msedge',
+    // Local dev uses the system Edge (zero download). CI installs
+    // Playwright's own Chromium (see .github/workflows/ci.yml) — the
+    // channel must be unset there or Playwright will look for Edge.
+    channel: process.env.CI ? undefined : 'msedge',
   },
   webServer: [
     {
@@ -17,7 +18,8 @@ export default defineConfig({
       cwd: '../signaling',
       url: 'http://localhost:8787/ws',
       reuseExistingServer: true,
-      timeout: 30_000,
+      // First boot compiles the Go binary and may fetch modules.
+      timeout: 90_000,
     },
     {
       command: 'npm run dev',
