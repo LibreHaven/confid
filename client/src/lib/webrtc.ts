@@ -9,6 +9,10 @@ const ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
 // DATA_CHANNEL_LABEL identifies the message channel within a connection.
 export const DATA_CHANNEL_LABEL = 'confid-messages';
 
+// CHANNEL_LOW_THRESHOLD_BYTES fires bufferedamountlow once the sender's
+// queue drains below this (file-transfer backpressure).
+const CHANNEL_LOW_THRESHOLD_BYTES = 256 * 1024;
+
 /** Events the session layer consumes from a PeerConnection. */
 export interface PeerEvents {
   onChannel(channel: RTCDataChannel): void;
@@ -37,6 +41,7 @@ export function createDataChannel(pc: RTCPeerConnection): RTCDataChannel {
   const channel = pc.createDataChannel(DATA_CHANNEL_LABEL, {
     ordered: true,
   });
+  channel.bufferedAmountLowThreshold = CHANNEL_LOW_THRESHOLD_BYTES;
   return channel;
 }
 

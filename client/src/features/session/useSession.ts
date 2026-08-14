@@ -13,6 +13,16 @@ import {
   importPublicKey,
   randomSalt,
 } from '../../lib/crypto';
+import { base64ToBuffer, bufferToBase64 } from '../../lib/base64';
+import {
+  FILE_CHUNK_KIND,
+  FILE_META_KIND,
+  MAX_FILE_BYTES,
+  FileReceiver,
+  parseFileMeta,
+  splitFile,
+  type FileChunk,
+} from '../../lib/fileTransfer';
 import { SignalingClient } from '../../lib/signaling';
 import {
   addIceCandidate,
@@ -30,12 +40,19 @@ import {
   type SignalKind,
 } from './sessionMachine';
 
-/** A chat message shown in the UI. */
-export interface ChatMessage {
-  id: string;
-  text: string;
-  own: boolean;
-}
+/** A chat message shown in the UI: plain text or a file transfer. */
+export type ChatMessage =
+  | { id: string; own: boolean; kind: 'text'; text: string }
+  | {
+      id: string;
+      own: boolean;
+      kind: 'file';
+      name: string;
+      size: number;
+      progress: number; // 0..1
+      state: 'sending' | 'receiving' | 'complete' | 'failed';
+      url?: string; // download link (receiver side, once complete)
+    };
 
 /** Crypto context derived during handshaking. */
 interface SessionCrypto {
@@ -53,6 +70,24 @@ const SESSION_INFO = 'confid/session/v1';
 // ROOM_ID_PATTERN matches the server's 6-char deconfused room ids
 // (mirror of hub.roomIDAlphabet: 0/O/1/I/l excluded).
 const ROOM_ID_PATTERN = /^[23456789abcdefghjkmnpqrstuvwxyz]{6}$/;
+
+// SEND_BACKPRESSURE_BYTES: the sender pauses while the channel buffer
+// holds more than this (file-transfer flow control).
+const SEND_BACKPRESSURE_BYTES = 1 * 1024 * 1024;
+
+/** Resolves once the channel buffer drains below the low threshold. */
+function waitForBackpressure(channel: RTCDataChannel): Promise<void> {
+  if (channel.bufferedAmount <= SEND_BACKPRESSURE_BYTES) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const onLow = () => {
+      channel.removeEventListener('bufferedamountlow', onLow);
+      resolve();
+    };
+    channel.addEventListener('bufferedamountlow', onLow);
+  });
+}
 
 const signalingUrl = () => {
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -77,6 +112,8 @@ export function useSession() {
   const crypto = useRef<SessionCrypto | null>(null);
   const pendingSalt = useRef<string | null>(null);
   const handshakeTimer = useRef<number | null>(null);
+  // In-flight inbound file transfers, keyed by the file id from the meta.
+  const receivers = useRef<Map<string, FileReceiver>>(new Map());
 
   const send = useCallback((event: SessionEvent) => dispatch(event), []);
 
@@ -101,16 +138,18 @@ export function useSession() {
 
   const handleChannelMessage = useCallback(
     async (raw: string) => {
-      let msg: { kind: string; data?: string };
+      let msg: { kind: string; data?: unknown };
       try {
-        msg = JSON.parse(raw) as { kind: string; data?: string };
+        msg = JSON.parse(raw) as { kind: string; data?: unknown };
       } catch {
         return; // malformed DataChannel frame: drop, never crash the session
       }
       if (msg.kind === 'hello' && crypto.current && !crypto.current.sessionKey) {
         try {
           // Peer's public key arrives over the channel; derive and verify.
-          const peerKey = await importPublicKey(JSON.parse(msg.data ?? '') as JsonWebKey);
+          const peerKey = await importPublicKey(
+            JSON.parse(msg.data as string) as JsonWebKey,
+          );
           const salt = new TextEncoder().encode(pendingSalt.current ?? '');
           const sessionKey = await deriveSessionKey(
             crypto.current.keyPair.privateKey,
@@ -132,15 +171,66 @@ export function useSession() {
         }
       } else if (msg.kind === 'text' && crypto.current?.sessionKey) {
         try {
-          const data = base64ToBuffer(msg.data ?? '');
+          const data = base64ToBuffer(msg.data as string);
           const text = await decryptMessage(crypto.current.sessionKey, data);
           setMessages((prev) => [
             ...prev,
-            { id: globalThis.crypto.randomUUID(), text, own: false },
+            { id: globalThis.crypto.randomUUID(), kind: 'text', text, own: false },
           ]);
         } catch {
           // Tampered or undecryptable message: drop it silently (AES-GCM
           // authentication already failed server-side of this call).
+        }
+      } else if (msg.kind === FILE_META_KIND) {
+        const meta = parseFileMeta(msg.data);
+        if (!meta) {
+          // Malformed or oversized declaration: refuse the transfer.
+          send({ type: 'ERROR', code: 'bad_file_meta' });
+          return;
+        }
+        receivers.current.set(meta.id, new FileReceiver(meta));
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: meta.id,
+            kind: 'file',
+            name: meta.name,
+            size: meta.size,
+            progress: 0,
+            state: 'receiving',
+            own: false,
+          },
+        ]);
+      } else if (msg.kind === FILE_CHUNK_KIND) {
+        const chunk = msg.data as FileChunk;
+        const receiver = receivers.current.get(chunk.id);
+        if (!receiver) return;
+        try {
+          const { complete } = receiver.addChunk(chunk);
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === chunk.id && m.kind === 'file'
+                ? {
+                    ...m,
+                    progress: receiver.progress,
+                    state: complete ? 'complete' : 'receiving',
+                    url: complete ? URL.createObjectURL(receiver.toBlob()) : m.url,
+                  }
+                : m,
+            ),
+          );
+          if (complete) receivers.current.delete(chunk.id);
+        } catch {
+          // Protocol corruption (wrong id, out of order, over-declared):
+          // abort the transfer and surface it as failed.
+          receivers.current.delete(chunk.id);
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === chunk.id && m.kind === 'file'
+                ? { ...m, state: 'failed' as const }
+                : m,
+            ),
+          );
         }
       }
     },
@@ -336,9 +426,15 @@ export function useSession() {
     pendingSalt.current = null;
     signaling.current?.close();
     signaling.current = null;
+    receivers.current.clear();
     // Zero-retention: a retry (or a new session in this tab) must not
     // resurrect messages or fingerprints from the finished session.
-    setMessages([]);
+    setMessages((prev) => {
+      for (const m of prev) {
+        if (m.kind === 'file' && m.url) URL.revokeObjectURL(m.url);
+      }
+      return [];
+    });
     setLocalFingerprint(null);
   }, [clearHandshakeTimer]);
 
@@ -364,8 +460,51 @@ export function useSession() {
     channel.current.send(JSON.stringify({ kind: 'text', data: bufferToBase64(cipher) }));
     setMessages((prev) => [
       ...prev,
-      { id: globalThis.crypto.randomUUID(), text, own: true },
+      { id: globalThis.crypto.randomUUID(), kind: 'text', text, own: true },
     ]);
+  }, []);
+
+  /**
+   * Sends a file over the DataChannel: meta frame, then ordered chunks with
+   * backpressure (pause while the channel buffer is full so a slow peer
+   * cannot balloon this side's memory). Files never touch the signaling
+   * server — the zero-retention invariant is unaffected.
+   */
+  const sendFile = useCallback(async (file: File): Promise<boolean> => {
+    if (!channel.current || !crypto.current?.sessionKey) return false;
+    if (file.size > MAX_FILE_BYTES) return false; // UI shows the reason
+    const id = globalThis.crypto.randomUUID();
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const { meta, chunks } = splitFile(
+      id,
+      file.name,
+      file.type || 'application/octet-stream',
+      bytes,
+    );
+    setMessages((prev) => [
+      ...prev,
+      {
+        id,
+        kind: 'file',
+        name: file.name,
+        size: file.size,
+        progress: 0,
+        state: 'sending',
+        own: true,
+      },
+    ]);
+    const ch = channel.current;
+    ch.send(JSON.stringify({ kind: FILE_META_KIND, data: meta }));
+    for (let i = 0; i < chunks.length; i++) {
+      await waitForBackpressure(ch);
+      ch.send(JSON.stringify({ kind: FILE_CHUNK_KIND, data: chunks[i] }));
+      const progress = (i + 1) / chunks.length;
+      setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, progress } : m)));
+    }
+    setMessages((prev) =>
+      prev.map((m) => (m.id === id ? { ...m, state: 'complete', progress: 1 } : m)),
+    );
+    return true;
   }, []);
 
   const retry = useCallback(() => {
@@ -379,26 +518,6 @@ export function useSession() {
     state,
     messages,
     localFingerprint,
-    actions: { createRoom, joinRoom, sendMessage, verifyFingerprint, retry },
+    actions: { createRoom, joinRoom, sendMessage, sendFile, verifyFingerprint, retry },
   };
-}
-
-// --- binary <-> base64 helpers (DataChannel is text-friendly) ---------------
-
-function bufferToBase64(buf: ArrayBuffer): string {
-  let binary = '';
-  const bytes = new Uint8Array(buf);
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]!);
-  }
-  return btoa(binary);
-}
-
-function base64ToBuffer(b64: string): ArrayBuffer {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes.buffer;
 }

@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSession, type ChatMessage } from './features/session/useSession';
 import type { SessionState } from './features/session/sessionMachine';
+import { MAX_FILE_BYTES } from './lib/fileTransfer';
 
 // Interaction contract (see docs/spec.md conventions):
 //   home    --[create]--> creating --[created]--> waiting --[peer joined]--> handshaking
@@ -254,12 +255,24 @@ function Chat({
   actions: ViewProps['actions'];
 }) {
   const [draft, setDraft] = useState('');
+  const fileInput = useRef<HTMLInputElement>(null);
 
   const send = () => {
     const text = draft.trim();
     if (!text) return;
     void actions.sendMessage(text);
     setDraft('');
+  };
+
+  const pickFile = (files: FileList | null) => {
+    const file = files?.[0];
+    if (!file) return;
+    if (file.size > MAX_FILE_BYTES) {
+      window.alert(`文件超过上限（${formatBytes(MAX_FILE_BYTES)}）`);
+      return;
+    }
+    void actions.sendFile(file);
+    if (fileInput.current) fileInput.current.value = '';
   };
 
   return (
@@ -280,22 +293,41 @@ function Chat({
         {messages.map((m) => (
           <div
             key={m.id}
-            data-testid="message"
+            data-testid={m.kind === 'file' ? 'file-message' : 'message'}
             className={`flex ${m.own ? 'justify-end' : 'justify-start'}`}
           >
-            <div
-              className={`max-w-[75%] rounded-2xl px-4 py-2 text-sm ${
-                m.own
-                  ? 'rounded-br-sm bg-emerald-700 text-white'
-                  : 'rounded-bl-sm bg-slate-800 text-slate-200'
-              }`}
-            >
-              {m.text}
-            </div>
+            {m.kind === 'text' ? (
+              <div
+                className={`max-w-[75%] rounded-2xl px-4 py-2 text-sm ${
+                  m.own
+                    ? 'rounded-br-sm bg-emerald-700 text-white'
+                    : 'rounded-bl-sm bg-slate-800 text-slate-200'
+                }`}
+              >
+                {m.text}
+              </div>
+            ) : (
+              <FileCard m={m} />
+            )}
           </div>
         ))}
       </div>
       <div className="flex gap-2 border-t border-slate-800 p-3">
+        <input
+          ref={fileInput}
+          type="file"
+          data-testid="file-input"
+          className="hidden"
+          onChange={(e) => pickFile(e.target.files)}
+        />
+        <button
+          data-testid="file-button"
+          onClick={() => fileInput.current?.click()}
+          title="发送文件（最大 100MB）"
+          className="rounded-xl border border-slate-700 px-3 font-medium text-slate-300 transition hover:border-emerald-600 hover:text-emerald-400"
+        >
+          📎
+        </button>
         <input
           data-testid="message-input"
           value={draft}
@@ -315,6 +347,59 @@ function Chat({
       </div>
     </div>
   );
+}
+
+/** File message card: name, size, progress, and a download link when done. */
+function FileCard({ m }: { m: Extract<ChatMessage, { kind: 'file' }> }) {
+  const stateLabel =
+    m.state === 'sending'
+      ? '发送中'
+      : m.state === 'receiving'
+        ? '接收中'
+        : m.state === 'complete'
+          ? '已完成'
+          : '传输失败';
+  return (
+    <div
+      data-testid="file-card"
+      className={`w-64 rounded-2xl border px-4 py-3 text-sm ${
+        m.own
+          ? 'rounded-br-sm border-emerald-900 bg-emerald-800/40 text-white'
+          : 'rounded-bl-sm border-slate-700 bg-slate-800 text-slate-200'
+      }`}
+    >
+      <div className="flex items-center gap-2">
+        <span className="text-lg">📄</span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-medium" title={m.name}>
+            {m.name}
+          </p>
+          <p className="text-xs opacity-70">
+            {formatBytes(m.size)}
+            {m.state !== 'failed' && ` · ${stateLabel} ${Math.round(m.progress * 100)}%`}
+            {m.state === 'failed' && ` · ${stateLabel}`}
+          </p>
+        </div>
+      </div>
+      {m.state === 'complete' && m.url && (
+        <a
+          data-testid="file-download"
+          href={m.url}
+          download={m.name}
+          className="mt-2 block rounded-lg bg-emerald-600 py-1.5 text-center text-xs font-medium text-white transition hover:bg-emerald-500"
+        >
+          下载文件
+        </a>
+      )}
+    </div>
+  );
+}
+
+/** Human-readable byte size (KB/MB). */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function StatusCard({
