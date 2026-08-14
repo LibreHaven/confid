@@ -75,7 +75,7 @@ signaling/                  # Go 单二进制，纯内存房间注册表 + 消�
     └── server/             # WebSocket 传输
 ```
 
-**协议要点**（详见 docs/spec.md）：
+**协议要点**（详见 [docs/PROTOCOL.md](docs/PROTOCOL.md)——零留存可审计的契约文本，及 [docs/DEPLOY.md](docs/DEPLOY.md)）：
 
 - 信令（WS JSON）：`create/created/join/joined/peer_joined/signal/peer_left/error`，房间码 6 位去混淆字符
 - 密钥协商：创建者生成随机盐随 offer 传输（双方共用）→ DataChannel 建立后互换公钥 → 各自派生 AES-GCM 会话密钥
