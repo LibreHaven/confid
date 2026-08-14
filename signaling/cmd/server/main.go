@@ -17,6 +17,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", ":8787", "listen address")
+	staticDir := flag.String("static", "", "serve the built frontend from this directory")
 	flag.Parse()
 
 	h := hub.New()
@@ -27,7 +28,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    *addr,
-		Handler: server.New(h).Handler(),
+		Handler: server.NewWithOptions(h, server.Options{StaticDir: *staticDir}).Handler(),
 		// Slowloris guard: reject headers that take too long to arrive.
 		ReadHeaderTimeout: 10 * time.Second,
 	}

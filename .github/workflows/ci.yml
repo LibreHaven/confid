@@ -76,3 +76,14 @@ jobs:
       - name: Run E2E
         run: npx playwright test
         working-directory: e2e
+
+  docker:
+    name: docker (build image)
+    runs-on: ubuntu-latest
+    needs: [client, signaling]
+    steps:
+      - uses: actions/checkout@v5
+      # Multi-stage build (node → golang → scratch) proves the Dockerfile
+      # stays in sync with both codebases on every push.
+      - name: Build image
+        run: docker build -t confid:ci .

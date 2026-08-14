@@ -2,7 +2,11 @@ package server
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -104,7 +108,7 @@ func TestPeerLeftWhenCreatorDisconnects(t *testing.T) {
 	}
 }
 
-// TestCreateThenJoinThenDisconnectInOrder covers repeated session usage:
+// TestPeerLeftAfterSessionReuse covers repeated session usage:
 // session 1 ends, then a fresh create/join pair must still notify correctly.
 func TestPeerLeftAfterSessionReuse(t *testing.T) {
 	srv := httptest.NewServer(New(hub.New()).Handler())
@@ -158,4 +162,112 @@ func TestPeerLeftAfterSessionReuse(t *testing.T) {
 	if got.Type != protocol.TypePeerLeft {
 		t.Fatalf("session 2: want peer_left, got %+v", got)
 	}
+}
+
+// TestStaticHostingServesFrontend: with StaticDir set, the same process
+// serves the built frontend alongside /ws and /healthz.
+func TestStaticHostingServesFrontend(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>confid</html>"), 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app.js"), []byte("console.log(1)"), 0o644); err != nil {
+		t.Fatalf("write asset: %v", err)
+	}
+
+	srv := httptest.NewServer(NewWithOptions(hub.New(), Options{StaticDir: dir}).Handler())
+	defer srv.Close()
+
+	index := getBody(t, srv.URL+"/")
+	if index != "<html>confid</html>" {
+		t.Fatalf("index body = %q", index)
+	}
+	if got := getBody(t, srv.URL+"/app.js"); got != "console.log(1)" {
+		t.Fatalf("asset body = %q", got)
+	}
+	if got := getBody(t, srv.URL+"/healthz"); got != "ok" {
+		t.Fatalf("healthz body = %q", got)
+	}
+
+	// The websocket endpoint must still upgrade alongside static hosting.
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("ws dial with static hosting: %v", err)
+	}
+	ws.Close()
+}
+
+// TestSecurityHeadersOnAllResponses: every response carries the hardening
+// headers (frame-ancestors cannot travel via the index.html meta CSP).
+func TestSecurityHeadersOnAllResponses(t *testing.T) {
+	srv := httptest.NewServer(New(hub.New()).Handler())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	for _, header := range []string{"X-Frame-Options", "X-Content-Type-Options", "Referrer-Policy", "Content-Security-Policy"} {
+		if got := resp.Header.Get(header); got == "" {
+			t.Fatalf("missing security header %q", header)
+		}
+	}
+	if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Fatalf("CSP missing frame-ancestors: %q", csp)
+	}
+}
+
+// TestConnLimitPerIP: the flood guard rejects connections beyond the per-IP
+// cap with 429, and admits new ones once an old connection closes.
+func TestConnLimitPerIP(t *testing.T) {
+	srv := httptest.NewServer(NewWithOptions(hub.New(), Options{MaxConnsPerIP: 2}).Handler())
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+
+	c1, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("c1 dial: %v", err)
+	}
+	defer c1.Close()
+	c2, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("c2 dial: %v", err)
+	}
+	defer c2.Close()
+
+	// Third concurrent connection from the same IP must be rejected.
+	_, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err == nil {
+		t.Fatal("third connection must be rejected")
+	}
+	if resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("rejection status = %v, want 429", resp)
+	}
+
+	// Closing one connection frees the slot.
+	c2.Close()
+	time.Sleep(50 * time.Millisecond) // let the read loop release the slot
+	c3, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("c3 dial after release: %v", err)
+	}
+	c3.Close()
+}
+
+// getBody fetches a URL and returns the response body.
+func getBody(t *testing.T, url string) string {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("get %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", url, err)
+	}
+	return string(body)
 }

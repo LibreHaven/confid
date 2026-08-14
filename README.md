@@ -25,6 +25,15 @@ npm run dev        # http://localhost:5173
 # 3. 使用：页面点击"创建安全会话"，把邀请链接/会话码发给对方
 ```
 
+## 快速开始（Docker，单进程部署）
+
+```bash
+# 构建并运行（同一进程服务前端 + 信令，详见 docs/DEPLOY.md）
+docker build -t confid .
+docker run -p 8787:8787 confid
+# 打开 http://localhost:8787/
+```
+
 ## 使用流程
 
 1. 创建者点击「创建安全会话」，获得 6 位会话码与邀请链接（`#/join/<code>`）

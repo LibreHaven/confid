@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/LibreHaven/confid/signaling/internal/hub"
@@ -32,6 +34,9 @@ const (
 	sendBuffer = 16
 	// maxMessageBytes caps inbound message size (SDP blobs can be large).
 	maxMessageBytes = 64 * 1024
+	// defaultMaxConnsPerIP caps concurrent websocket connections from one
+	// client IP (connection-flood guard for the public deployment).
+	defaultMaxConnsPerIP = 10
 )
 
 var upgrader = websocket.Upgrader{
@@ -42,21 +47,117 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+// Options configures the served endpoints.
+type Options struct {
+	// StaticDir serves the built frontend (index.html + assets) when set,
+	// giving a single-process deployment: same origin for page + /ws.
+	StaticDir string
+	// MaxConnsPerIP caps concurrent websocket connections per client IP;
+	// zero uses defaultMaxConnsPerIP.
+	MaxConnsPerIP int
+}
+
 // Server hosts the signaling endpoint.
 type Server struct {
-	hub *hub.Hub
+	hub     *hub.Hub
+	opts    Options
+	limiter *connLimiter
 }
 
 // New creates a Server backed by the given hub.
 func New(h *hub.Hub) *Server {
-	return &Server{hub: h}
+	return &Server{
+		hub:     h,
+		opts:    Options{MaxConnsPerIP: defaultMaxConnsPerIP},
+		limiter: newConnLimiter(),
+	}
 }
 
-// Handler returns the HTTP handler for the signaling endpoint.
+// NewWithOptions creates a Server with deployment options (static hosting,
+// per-IP connection cap).
+func NewWithOptions(h *hub.Hub, opts Options) *Server {
+	s := New(h)
+	if opts.MaxConnsPerIP == 0 {
+		opts.MaxConnsPerIP = defaultMaxConnsPerIP
+	}
+	s.opts = opts
+	return s
+}
+
+// Handler returns the HTTP handler for the signaling endpoint (and, when
+// StaticDir is set, the frontend and health endpoints). All responses get
+// security headers.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 	mux.HandleFunc("/ws", s.serveWS)
-	return mux
+	if s.opts.StaticDir != "" {
+		// The frontend uses hash routing (#/join/...), so serving the
+		// directory as-is needs no SPA fallback.
+		mux.Handle("/", http.FileServer(http.Dir(s.opts.StaticDir)))
+	}
+	return securityHeaders(mux)
+}
+
+// connLimiter tracks live connections per client IP (flood guard).
+type connLimiter struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func newConnLimiter() *connLimiter {
+	return &connLimiter{counts: make(map[string]int)}
+}
+
+func (l *connLimiter) acquire(ip string, max int) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.counts[ip] >= max {
+		return false
+	}
+	l.counts[ip]++
+	return true
+}
+
+func (l *connLimiter) release(ip string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if n := l.counts[ip] - 1; n <= 0 {
+		delete(l.counts, ip)
+	} else {
+		l.counts[ip] = n
+	}
+}
+
+// clientIP extracts the host part of a RemoteAddr ("ip:port").
+func clientIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
+}
+
+// securityHeaders hardens every response (the meta CSP in index.html cannot
+// carry frame-ancestors; the header form covers it for the deployed app).
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set(
+			"Content-Security-Policy",
+			"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+		)
+		if r.TLS != nil {
+			// Only meaningful once the server terminates TLS itself.
+			w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // client is one connected peer.
@@ -78,6 +179,12 @@ func (c *client) Send(msg protocol.Message) error {
 }
 
 func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r.RemoteAddr)
+	if !s.limiter.acquire(ip, s.opts.MaxConnsPerIP) {
+		http.Error(w, "too many connections", http.StatusTooManyRequests)
+		return
+	}
+	defer s.limiter.release(ip)
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
