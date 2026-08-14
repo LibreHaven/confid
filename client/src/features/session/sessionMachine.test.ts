@@ -3,6 +3,7 @@ import {
   initialState,
   inviteUrlFor,
   sessionReducer,
+  acceptsSignal,
   type SessionEvent,
   type SessionState,
 } from './sessionMachine';
@@ -137,6 +138,15 @@ describe('session machine — guards and failure recovery', () => {
     });
   });
 
+  it('waiting (creator cancels) is retryable back to idle', () => {
+    expect(
+      sessionReducer(
+        { phase: 'waiting', roomId: 'x7k2p9', inviteUrl: 'u' },
+        { type: 'RETRY' },
+      ),
+    ).toEqual({ phase: 'idle' });
+  });
+
   it('terminal states ignore live events', () => {
     const failed = { phase: 'failed', reason: 'x' } as SessionState;
     expect(sessionReducer(failed, { type: 'CREATE' })).toBe(failed);
@@ -148,5 +158,45 @@ describe('inviteUrlFor', () => {
   it('appends the join hash to the current origin path', () => {
     const url = inviteUrlFor('x7k2p9');
     expect(url).toContain('#/join/x7k2p9');
+  });
+});
+
+describe('acceptsSignal — role guard', () => {
+  const creator = { phase: 'handshaking', role: 'creator' } as const;
+  const joiner = { phase: 'handshaking', role: 'joiner' } as const;
+  const active = { phase: 'active' } as const;
+
+  it('joiner accepts offers; creator rejects them', () => {
+    expect(acceptsSignal(joiner, 'offer')).toBe(true);
+    expect(acceptsSignal(creator, 'offer')).toBe(false);
+  });
+
+  it('creator accepts answers; joiner rejects them', () => {
+    expect(acceptsSignal(creator, 'answer')).toBe(true);
+    expect(acceptsSignal(joiner, 'answer')).toBe(false);
+  });
+
+  it('both roles accept ICE during handshaking', () => {
+    expect(acceptsSignal(creator, 'ice')).toBe(true);
+    expect(acceptsSignal(joiner, 'ice')).toBe(true);
+  });
+
+  it('active only tolerates late ICE (trickle tail)', () => {
+    expect(acceptsSignal(active, 'ice')).toBe(true);
+    expect(acceptsSignal(active, 'offer')).toBe(false);
+    expect(acceptsSignal(active, 'answer')).toBe(false);
+  });
+
+  it('rejects all signaling outside handshaking/active', () => {
+    for (const s of [
+      initialState,
+      { phase: 'waiting', roomId: 'x7k2p9', inviteUrl: 'u' },
+      { phase: 'verifying', remoteFingerprint: 'f' },
+      { phase: 'failed', reason: 'x' },
+    ] as SessionState[]) {
+      expect(acceptsSignal(s, 'offer')).toBe(false);
+      expect(acceptsSignal(s, 'answer')).toBe(false);
+      expect(acceptsSignal(s, 'ice')).toBe(false);
+    }
   });
 });

@@ -22,7 +22,13 @@ import {
   createPeerConnection,
   setRemoteDescription,
 } from '../../lib/webrtc';
-import { initialState, sessionReducer, type SessionEvent } from './sessionMachine';
+import {
+  initialState,
+  sessionReducer,
+  acceptsSignal,
+  type SessionEvent,
+  type SignalKind,
+} from './sessionMachine';
 
 /** A chat message shown in the UI. */
 export interface ChatMessage {
@@ -44,6 +50,10 @@ const HANDSHAKE_TIMEOUT_MS = 30_000;
 // SESSION_INFO binds the derived key to this application context.
 const SESSION_INFO = 'confid/session/v1';
 
+// ROOM_ID_PATTERN matches the server's 6-char deconfused room ids
+// (mirror of hub.roomIDAlphabet: 0/O/1/I/l excluded).
+const ROOM_ID_PATTERN = /^[23456789abcdefghjkmnpqrstuvwxyz]{6}$/;
+
 const signalingUrl = () => {
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
   return `${proto}://${window.location.host}/ws`;
@@ -53,6 +63,13 @@ export function useSession() {
   const [state, dispatch] = useReducer(sessionReducer, initialState);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [localFingerprint, setLocalFingerprint] = useState<string | null>(null);
+
+  // Mirrors the latest state for stable callbacks (transport handlers must
+  // not be recreated per render, yet need to read the current phase/role).
+  const stateRef = useRef(state);
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   const signaling = useRef<SignalingClient | null>(null);
   const pc = useRef<RTCPeerConnection | null>(null);
@@ -84,31 +101,47 @@ export function useSession() {
 
   const handleChannelMessage = useCallback(
     async (raw: string) => {
-      const msg = JSON.parse(raw) as { kind: string; data?: string };
+      let msg: { kind: string; data?: string };
+      try {
+        msg = JSON.parse(raw) as { kind: string; data?: string };
+      } catch {
+        return; // malformed DataChannel frame: drop, never crash the session
+      }
       if (msg.kind === 'hello' && crypto.current && !crypto.current.sessionKey) {
-        // Peer's public key arrives over the channel; derive and verify.
-        const peerKey = await importPublicKey(JSON.parse(msg.data!));
-        const salt = new TextEncoder().encode(pendingSalt.current ?? '');
-        const sessionKey = await deriveSessionKey(
-          crypto.current.keyPair.privateKey,
-          peerKey,
-          salt,
-          SESSION_INFO,
-        );
-        crypto.current.sessionKey = sessionKey;
-        crypto.current.remoteFingerprint = await fingerprintOf(peerKey);
-        clearHandshakeTimer();
-        send({
-          type: 'PUBLIC_KEYS_READY',
-          remoteFingerprint: crypto.current.remoteFingerprint,
-        });
+        try {
+          // Peer's public key arrives over the channel; derive and verify.
+          const peerKey = await importPublicKey(JSON.parse(msg.data ?? '') as JsonWebKey);
+          const salt = new TextEncoder().encode(pendingSalt.current ?? '');
+          const sessionKey = await deriveSessionKey(
+            crypto.current.keyPair.privateKey,
+            peerKey,
+            salt,
+            SESSION_INFO,
+          );
+          crypto.current.sessionKey = sessionKey;
+          crypto.current.remoteFingerprint = await fingerprintOf(peerKey);
+          clearHandshakeTimer();
+          send({
+            type: 'PUBLIC_KEYS_READY',
+            remoteFingerprint: crypto.current.remoteFingerprint,
+          });
+        } catch {
+          // A malformed or wrong-curve public key must fail the handshake,
+          // not leave the session stuck in an unhandled promise rejection.
+          send({ type: 'ERROR', code: 'bad_peer_key' });
+        }
       } else if (msg.kind === 'text' && crypto.current?.sessionKey) {
-        const data = base64ToBuffer(msg.data!);
-        const text = await decryptMessage(crypto.current.sessionKey, data);
-        setMessages((prev) => [
-          ...prev,
-          { id: globalThis.crypto.randomUUID(), text, own: false },
-        ]);
+        try {
+          const data = base64ToBuffer(msg.data ?? '');
+          const text = await decryptMessage(crypto.current.sessionKey, data);
+          setMessages((prev) => [
+            ...prev,
+            { id: globalThis.crypto.randomUUID(), text, own: false },
+          ]);
+        } catch {
+          // Tampered or undecryptable message: drop it silently (AES-GCM
+          // authentication already failed server-side of this call).
+        }
       }
     },
     [clearHandshakeTimer, send],
@@ -143,9 +176,23 @@ export function useSession() {
         salt?: string;
         candidate?: unknown;
       };
+      // Role guard (protocol layer): only accept the SDP kinds this side
+      // may legally process. A malicious peer driving our WebRTC stack
+      // (e.g. an offer racing the creator's own offer) must not corrupt
+      // the SDP state machine.
+      if (!acceptsSignal(stateRef.current, sig.kind as SignalKind)) {
+        return;
+      }
       switch (sig.kind) {
         case 'offer': {
-          pendingSalt.current = sig.salt ?? null;
+          if (typeof sig.salt !== 'string') {
+            // The salt is a shared HKDF parameter: without it the derived
+            // keys would diverge. Fail loudly instead of negotiating a
+            // broken session.
+            send({ type: 'ERROR', code: 'missing_salt' });
+            return;
+          }
+          pendingSalt.current = sig.salt;
           await setRemoteDescription(pc.current!, {
             type: 'offer',
             sdp: sig.sdp!,
@@ -162,18 +209,17 @@ export function useSession() {
           });
           break;
         case 'ice':
-          await addIceCandidate(pc.current!, sig.candidate as RTCIceCandidateInit);
+          try {
+            await addIceCandidate(pc.current!, sig.candidate as RTCIceCandidateInit);
+          } catch {
+            // Invalid/stale candidate: ignore. Late candidates for a
+            // closed connection are normal during trickle ICE teardown.
+          }
           break;
       }
     },
     [send],
   );
-
-  const connect = useCallback(() => {
-    send({ type: 'CONNECTED' });
-    // no-op: signaling client is created on first create/join to keep
-    // the machine's phases authoritative.
-  }, [send]);
 
   const startSignaling = useCallback(
     (roomId?: string) => {
@@ -232,6 +278,12 @@ export function useSession() {
 
   const joinRoom = useCallback(
     async (roomId: string) => {
+      // Boundary validation: rooms are 6 chars from the deconfused alphabet.
+      // Reject anything else locally instead of firing a doomed join.
+      if (!ROOM_ID_PATTERN.test(roomId)) {
+        send({ type: 'ERROR', code: 'bad_room_id' });
+        return;
+      }
       await startPeerSetup();
       startSignaling(roomId);
       send({ type: 'CONNECTED' });
@@ -242,47 +294,62 @@ export function useSession() {
 
   // --- WebRTC wiring --------------------------------------------------------
 
+  // Extracted for the effect below: the phase union narrows in the render
+  // body, so the dependency array stays type-safe.
+  const phase = state.phase;
+  const role = state.phase === 'handshaking' ? state.role : null;
+
   useEffect(() => {
-    if (
-      state.phase === 'handshaking' &&
-      state.role === 'creator' &&
-      pc.current &&
-      !channel.current
-    ) {
+    if (phase === 'handshaking' && role === 'creator' && pc.current && !channel.current) {
       // Creator side: owns the channel and initiates the offer.
       // Channel open/sendHello is handled inside onChannel for both sides.
       const offerChannel = createDataChannel(pc.current);
       onChannel(offerChannel); // sets onopen → sendHello + onmessage
-      void createOffer(pc.current!).then((offer) => {
-        // The salt must be stored locally AND sent with the offer: both
-        // peers derive the session key from the same salt.
-        const salt = randomSalt();
-        pendingSalt.current = salt;
-        signaling.current?.sendSignal({
-          kind: 'offer',
-          sdp: offer.sdp,
-          salt,
-        });
-      });
+      void createOffer(pc.current!).then(
+        (offer) => {
+          // The salt must be stored locally AND sent with the offer: both
+          // peers derive the session key from the same salt.
+          const salt = randomSalt();
+          pendingSalt.current = salt;
+          signaling.current?.sendSignal({
+            kind: 'offer',
+            sdp: offer.sdp,
+            salt,
+          });
+        },
+        () => send({ type: 'ERROR', code: 'offer_failed' }),
+      );
       startHandshakeTimer();
     }
-  }, [state.phase, onChannel, startHandshakeTimer]);
+  }, [phase, role, onChannel, send, startHandshakeTimer]);
+
+  // Full teardown of transport + crypto state. Idempotent: called from the
+  // terminal-state effect AND directly by retry (cancelling a waiting room
+  // never passes through failed/closed, but must still release everything).
+  const teardown = useCallback(() => {
+    clearHandshakeTimer();
+    channel.current?.close();
+    pc.current?.close();
+    channel.current = null;
+    pc.current = null;
+    crypto.current = null;
+    pendingSalt.current = null;
+    signaling.current?.close();
+    signaling.current = null;
+    // Zero-retention: a retry (or a new session in this tab) must not
+    // resurrect messages or fingerprints from the finished session.
+    setMessages([]);
+    setLocalFingerprint(null);
+  }, [clearHandshakeTimer]);
 
   useEffect(() => {
     if (state.phase === 'active') {
       clearHandshakeTimer();
     }
     if (state.phase === 'failed' || state.phase === 'closed') {
-      clearHandshakeTimer();
-      channel.current?.close();
-      pc.current?.close();
-      channel.current = null;
-      pc.current = null;
-      crypto.current = null;
-      signaling.current?.close();
-      signaling.current = null;
+      teardown();
     }
-  }, [state.phase, clearHandshakeTimer]);
+  }, [state.phase, clearHandshakeTimer, teardown]);
 
   // --- User actions ---------------------------------------------------------
 
@@ -301,13 +368,18 @@ export function useSession() {
     ]);
   }, []);
 
-  const retry = useCallback(() => send({ type: 'RETRY' }), [send]);
+  const retry = useCallback(() => {
+    // Teardown first: cancelling from a waiting room (or any state) must
+    // release transports even though the state machine skips failed/closed.
+    teardown();
+    send({ type: 'RETRY' });
+  }, [send, teardown]);
 
   return {
     state,
     messages,
     localFingerprint,
-    actions: { createRoom, joinRoom, sendMessage, verifyFingerprint, retry, connect },
+    actions: { createRoom, joinRoom, sendMessage, verifyFingerprint, retry },
   };
 }
 

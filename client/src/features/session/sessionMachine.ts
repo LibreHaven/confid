@@ -34,6 +34,38 @@ export type SessionEvent =
   | { type: 'RETRY' }
   | { type: 'CLOSE' };
 
+// Failure/close reasons surfaced in the UI. Kept as named constants so the
+// machine's contract (and its tests) don't drift from the rendered text.
+export const REASON_PEER_LEFT = 'peer left';
+export const REASON_CLOSED = 'closed';
+export const REASON_HANDSHAKE_TIMEOUT = 'handshake timeout';
+export const REASON_VERIFY_TIMEOUT = 'verification timeout';
+export const REASON_FINGERPRINT_MISMATCH = 'fingerprint mismatch';
+
+/** Signaling payload kinds relayed during the SDP/ICE exchange. */
+export type SignalKind = 'offer' | 'answer' | 'ice';
+
+/**
+ * Whether a signaling payload kind may be processed in the current state.
+ *
+ * This is the transport-level counterpart of the state machine guards:
+ * the offer/answer asymmetry is enforced HERE, before touching WebRTC, so
+ * a malicious or buggy peer cannot drive this side's SDP state machine.
+ * - offer:   only the joiner may accept one (the creator owns the offer).
+ * - answer:  only the creator may accept one.
+ * - ice:     any handshaking peer, and tolerantly during active (trickle
+ *            ICE tail candidates legitimately arrive after connection).
+ */
+export function acceptsSignal(state: SessionState, kind: SignalKind): boolean {
+  if (state.phase === 'handshaking') {
+    if (kind === 'offer') return state.role === 'joiner';
+    if (kind === 'answer') return state.role === 'creator';
+    return true; // ice
+  }
+  if (state.phase === 'active') return kind === 'ice';
+  return false;
+}
+
 export const initialState: SessionState = { phase: 'idle' };
 
 /** Builds the invite URL for a room (hash-based so it works on any host). */
@@ -65,37 +97,39 @@ export function sessionReducer(state: SessionState, event: SessionEvent): Sessio
 
     case 'waiting':
       if (event.type === 'PEER_JOINED') return { phase: 'handshaking', role: 'creator' };
-      if (event.type === 'PEER_LEFT') return closed('peer left');
+      if (event.type === 'PEER_LEFT') return closed(REASON_PEER_LEFT);
       if (event.type === 'ERROR') return fail(event.code);
-      if (event.type === 'CLOSE') return closed('closed');
+      if (event.type === 'CLOSE') return closed(REASON_CLOSED);
+      if (event.type === 'RETRY') return { phase: 'idle' }; // user cancels a waiting room
       return state;
 
     case 'joining':
       if (event.type === 'JOINED' || event.type === 'OFFER_RECEIVED')
         return { phase: 'handshaking', role: 'joiner' };
       if (event.type === 'ERROR') return fail(event.code);
-      if (event.type === 'PEER_LEFT') return closed('peer left');
+      if (event.type === 'PEER_LEFT') return closed(REASON_PEER_LEFT);
       return state;
 
     case 'handshaking':
       if (event.type === 'PUBLIC_KEYS_READY')
         return { phase: 'verifying', remoteFingerprint: event.remoteFingerprint };
       if (event.type === 'ERROR') return fail(event.code);
-      if (event.type === 'TIMEOUT') return fail('handshake timeout');
-      if (event.type === 'PEER_LEFT') return closed('peer left');
+      if (event.type === 'TIMEOUT') return fail(REASON_HANDSHAKE_TIMEOUT);
+      if (event.type === 'PEER_LEFT') return closed(REASON_PEER_LEFT);
       return state;
 
     case 'verifying':
       if (event.type === 'VERIFY' && event.match) return { phase: 'active' };
-      if (event.type === 'VERIFY' && !event.match) return fail('fingerprint mismatch');
-      if (event.type === 'TIMEOUT') return fail('verification timeout');
-      if (event.type === 'PEER_LEFT') return closed('peer left');
+      if (event.type === 'VERIFY' && !event.match)
+        return fail(REASON_FINGERPRINT_MISMATCH);
+      if (event.type === 'TIMEOUT') return fail(REASON_VERIFY_TIMEOUT);
+      if (event.type === 'PEER_LEFT') return closed(REASON_PEER_LEFT);
       return state;
 
     case 'active':
-      if (event.type === 'PEER_LEFT') return closed('peer left');
+      if (event.type === 'PEER_LEFT') return closed(REASON_PEER_LEFT);
       if (event.type === 'ERROR') return fail(event.code);
-      if (event.type === 'CLOSE') return closed('closed');
+      if (event.type === 'CLOSE') return closed(REASON_CLOSED);
       return state;
 
     case 'failed':

@@ -18,13 +18,19 @@ export default function App() {
   useEffect(() => {
     const tryJoinFromHash = () => {
       const match = window.location.hash.match(/#\/join\/([0-9a-z]+)/);
-      if (match && match[1]) {
-        window.history.replaceState(null, '', window.location.pathname);
-        if (state.phase === 'failed' || state.phase === 'closed') {
-          retry(); // terminal states must reset before joining again
-        }
-        void joinRoom(match[1]);
+      if (!match || !match[1]) return;
+      const phase = state.phase;
+      const joinable =
+        phase === 'idle' || phase === 'ready' || phase === 'failed' || phase === 'closed';
+      // Consume the hash either way: a joinable state joins immediately; a
+      // mid-session state ignores the link but must not leave it lingering
+      // (it would auto-join on the next RETRY back to idle).
+      window.history.replaceState(null, '', window.location.pathname);
+      if (!joinable) return;
+      if (phase === 'failed' || phase === 'closed') {
+        retry(); // terminal states must reset before joining again
       }
+      void joinRoom(match[1]);
     };
     tryJoinFromHash();
     window.addEventListener('hashchange', tryJoinFromHash);
@@ -248,9 +254,6 @@ function Chat({
   actions: ViewProps['actions'];
 }) {
   const [draft, setDraft] = useState('');
-  // The chat view only renders after fingerprint verification (active),
-  // so the encrypted channel is established by construction.
-  const verified = true;
 
   const send = () => {
     const text = draft.trim();
@@ -263,12 +266,8 @@ function Chat({
     <div className="flex h-[26rem] flex-col rounded-2xl border border-slate-800 bg-slate-900">
       <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
         <div className="flex items-center gap-2 text-sm">
-          <span
-            className={`h-2 w-2 rounded-full ${verified ? 'bg-emerald-500' : 'bg-amber-500'}`}
-          />
-          <span className="text-slate-300">
-            {verified ? '加密通道已建立' : '加密通道建立中'}
-          </span>
+          <span className="h-2 w-2 rounded-full bg-emerald-500" />
+          <span className="text-slate-300">加密通道已建立</span>
         </div>
         <span className="text-xs text-slate-500">端到端加密</span>
       </div>
