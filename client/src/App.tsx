@@ -256,6 +256,13 @@ function Chat({
 }) {
   const [draft, setDraft] = useState('');
   const fileInput = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Keep the newest message in view as the conversation grows.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages]);
 
   const send = () => {
     const text = draft.trim();
@@ -284,7 +291,7 @@ function Chat({
         </div>
         <span className="text-xs text-slate-500">端到端加密</span>
       </div>
-      <div className="flex-1 space-y-3 overflow-y-auto p-4">
+      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
         {messages.length === 0 && (
           <p className="pt-16 text-center text-sm text-slate-600">
             会话开始——发送第一条消息
@@ -317,12 +324,14 @@ function Chat({
           ref={fileInput}
           type="file"
           data-testid="file-input"
+          aria-label="选择要发送的文件"
           className="hidden"
           onChange={(e) => pickFile(e.target.files)}
         />
         <button
           data-testid="file-button"
           onClick={() => fileInput.current?.click()}
+          aria-label="发送文件（最大 100MB）"
           title="发送文件（最大 100MB）"
           className="rounded-xl border border-slate-700 px-3 font-medium text-slate-300 transition hover:border-emerald-600 hover:text-emerald-400"
         >
@@ -333,6 +342,7 @@ function Chat({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && send()}
+          aria-label="消息内容"
           placeholder="输入消息…"
           className="flex-1 rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm outline-none placeholder:text-slate-600 focus:border-emerald-500"
         />
@@ -369,7 +379,9 @@ function FileCard({ m }: { m: Extract<ChatMessage, { kind: 'file' }> }) {
       }`}
     >
       <div className="flex items-center gap-2">
-        <span className="text-lg">📄</span>
+        <span className="text-lg" aria-hidden="true">
+          📄
+        </span>
         <div className="min-w-0 flex-1">
           <p className="truncate font-medium" title={m.name}>
             {m.name}
@@ -381,6 +393,21 @@ function FileCard({ m }: { m: Extract<ChatMessage, { kind: 'file' }> }) {
           </p>
         </div>
       </div>
+      {m.state !== 'failed' && (
+        <div
+          role="progressbar"
+          aria-valuenow={Math.round(m.progress * 100)}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-label={`${m.name} 传输进度`}
+          className="mt-2 h-1 w-full overflow-hidden rounded-full bg-slate-950"
+        >
+          <div
+            className="h-full bg-emerald-500 transition-all"
+            style={{ width: `${Math.round(m.progress * 100)}%` }}
+          />
+        </div>
+      )}
       {m.state === 'complete' && m.url && (
         <a
           data-testid="file-download"
