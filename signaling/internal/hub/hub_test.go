@@ -3,6 +3,7 @@ package hub
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LibreHaven/confid/signaling/internal/protocol"
 )
@@ -109,5 +110,67 @@ func TestRoomIDsUnique(t *testing.T) {
 			t.Fatalf("duplicate room id %q", id)
 		}
 		seen[id] = true
+	}
+}
+
+func TestRoomIDCharactersUniform(t *testing.T) {
+	// Rejection sampling must keep the alphabet distribution flat: with
+	// 6200 draws each char should appear ~200 times; a biased mapping
+	// would push the first chars to ~225. Allow generous slack for noise.
+	const draws = 6200
+	const expected = draws / len(roomIDAlphabet)
+	counts := make(map[byte]int)
+	for i := 0; i < draws; i++ {
+		counts[randomAlphabetChar()]++
+	}
+	for _, c := range []byte(roomIDAlphabet) {
+		if n := counts[c]; n < expected-40 || n > expected+40 {
+			t.Fatalf("char %q drawn %d times, want ~%d", c, n, expected)
+		}
+	}
+}
+
+func TestInviteExpiresAfterTTL(t *testing.T) {
+	h := New()
+	a := &fakePeer{}
+	room := h.Create(a)
+
+	// Simulate a lapsed invite: join must be rejected and room reclaimed.
+	room.expiresAt = time.Now().Add(-time.Second)
+	if _, errMsg := h.Join(room.ID(), &fakePeer{}); errMsg.Code != protocol.ErrRoomNotFound {
+		t.Fatalf("expired invite must yield room_not_found, got %+v", errMsg)
+	}
+	if h.RoomCount() != 0 {
+		t.Fatalf("expired room not reclaimed, count = %d", h.RoomCount())
+	}
+}
+
+func TestActiveSessionNeverExpires(t *testing.T) {
+	h := New()
+	a, b := &fakePeer{}, &fakePeer{}
+	room := h.Create(a)
+
+	// Second peer joins: the session starts and the invite stops expiring
+	// (Add clears expiresAt; even a far-future check must not expire).
+	room.Add(b)
+	if room.Expired(time.Now().Add(time.Hour)) {
+		t.Fatal("started session must not expire")
+	}
+	if other := h.Leave(b); other != a {
+		t.Fatalf("leave returned %+v, want peer a", other)
+	}
+}
+
+func TestCleanerReclaimsOnlyExpiredRooms(t *testing.T) {
+	h := New()
+	h.Create(&fakePeer{})
+	// Backdate a second room's invite.
+	r2 := h.Create(&fakePeer{})
+	r2.expiresAt = time.Now().Add(-time.Second)
+
+	h.cleanExpired(time.Now())
+
+	if h.RoomCount() != 1 {
+		t.Fatalf("cleaner removed %d rooms, want 1 (only the expired one)", 2-h.RoomCount())
 	}
 }

@@ -20,9 +20,16 @@ func main() {
 	flag.Parse()
 
 	h := hub.New()
+	// Reclaim rooms whose invite expired before anyone joined.
+	stopCleaner := make(chan struct{})
+	defer close(stopCleaner)
+	h.StartCleaner(time.Minute, stopCleaner)
+
 	srv := &http.Server{
 		Addr:    *addr,
 		Handler: server.New(h).Handler(),
+		// Slowloris guard: reject headers that take too long to arrive.
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	go func() {

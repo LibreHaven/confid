@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/LibreHaven/confid/signaling/internal/protocol"
 )
@@ -22,8 +23,18 @@ const RoomCapacity = 2
 // RoomIDLength is the number of characters in a generated room id.
 const RoomIDLength = 6
 
+// InviteTTL is how long a created room stays joinable before the invite
+// expires (mirrors the UI copy "会话码 30 分钟内有效"). Once a second peer
+// joins, the expiry is cleared: an active session must not be torn down
+// by the cleaner while both peers are connected.
+const InviteTTL = 30 * time.Minute
+
 // roomIDAlphabet excludes easily confused characters (0/O, 1/I/l).
 const roomIDAlphabet = "23456789abcdefghjkmnpqrstuvwxyz"
+
+// maxAlphabetIndex is the largest multiple of len(roomIDAlphabet) below 256;
+// bytes >= this are rejected to keep the alphabet distribution uniform.
+const maxAlphabetIndex = 256 - (256 % len(roomIDAlphabet)) // 248
 
 // Peer is anything that can receive signaling messages.
 type Peer interface {
@@ -32,16 +43,18 @@ type Peer interface {
 
 // Room holds up to RoomCapacity peers.
 type Room struct {
-	id    string
-	mu    sync.Mutex
-	peers [RoomCapacity]Peer
-	count int
+	id        string
+	mu        sync.Mutex
+	peers     [RoomCapacity]Peer
+	count     int
+	expiresAt time.Time // zero means no expiry (session started)
 }
 
 // ID returns the room identifier.
 func (r *Room) ID() string { return r.id }
 
 // Add joins a peer; returns false when the room is full.
+// When the second peer arrives, the invite stops expiring.
 func (r *Room) Add(p Peer) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -50,6 +63,9 @@ func (r *Room) Add(p Peer) bool {
 	}
 	r.peers[r.count] = p
 	r.count++
+	if r.count == RoomCapacity {
+		r.expiresAt = time.Time{} // session started: no expiry
+	}
 	return true
 }
 
@@ -60,6 +76,7 @@ func (r *Room) Remove(p Peer) Peer {
 	for i := 0; i < r.count; i++ {
 		if r.peers[i] == p {
 			r.peers[i] = r.peers[r.count-1]
+			r.peers[r.count-1] = nil // drop the reference for GC
 			r.count--
 			// The remaining peer (if any) sits in peers[:count]. Find the
 			// first entry that is NOT the removed peer. (Can't use
@@ -74,6 +91,13 @@ func (r *Room) Remove(p Peer) Peer {
 		}
 	}
 	return nil
+}
+
+// Expired reports whether the invite has lapsed and nobody has joined yet.
+func (r *Room) Expired(now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return !r.expiresAt.IsZero() && now.After(r.expiresAt)
 }
 
 // Relay forwards a message from sender to the other peer.
@@ -122,7 +146,7 @@ func (h *Hub) Create(creator Peer) *Room {
 		id := randomID(RoomIDLength)
 		h.mu.Lock()
 		if _, exists := h.rooms[id]; !exists {
-			r := &Room{id: id}
+			r := &Room{id: id, expiresAt: time.Now().Add(InviteTTL)}
 			r.Add(creator)
 			h.rooms[id] = r
 			h.mu.Unlock()
@@ -132,10 +156,16 @@ func (h *Hub) Create(creator Peer) *Room {
 	}
 }
 
-// Join looks up a room and adds the peer.
+// Join looks up a room and adds the peer. Expired rooms are treated as
+// missing (and reclaimed) so a stale invite cannot be used.
 func (h *Hub) Join(roomID string, p Peer) (*Room, protocol.Message) {
+	now := time.Now()
 	h.mu.Lock()
 	r, ok := h.rooms[roomID]
+	if ok && r.Expired(now) {
+		delete(h.rooms, roomID)
+		ok = false
+	}
 	h.mu.Unlock()
 	if !ok {
 		return nil, protocol.New(protocol.TypeError, "", protocol.ErrRoomNotFound, nil)
@@ -170,14 +200,54 @@ func (h *Hub) RoomCount() int {
 	return len(h.rooms)
 }
 
-func randomID(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		panic(err) // crypto/rand failure is unrecoverable
+// StartCleaner runs a background loop that reclaims rooms whose invite
+// expired before anyone joined. cancel stops the loop.
+func (h *Hub) StartCleaner(interval time.Duration, cancel <-chan struct{}) {
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-cancel:
+				return
+			case <-t.C:
+				h.cleanExpired(time.Now())
+			}
+		}
+	}()
+}
+
+// cleanExpired deletes rooms with an lapsed invite that never started.
+func (h *Hub) cleanExpired(now time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for id, r := range h.rooms {
+		if r.Expired(now) {
+			delete(h.rooms, id)
+		}
 	}
+}
+
+func randomID(n int) string {
 	out := make([]byte, n)
-	for i, v := range b {
-		out[i] = roomIDAlphabet[int(v)%len(roomIDAlphabet)]
+	for i := range out {
+		out[i] = randomAlphabetChar()
 	}
 	return string(out)
+}
+
+// randomAlphabetChar draws one uniform alphabet byte via rejection sampling:
+// crypto/rand bytes are uniform in [0,256), and mapping 256 values onto a
+// 31-char alphabet with % would bias the first characters. Bytes >= the
+// largest multiple of 31 (248) are rejected and redrawn (~3% retries).
+func randomAlphabetChar() byte {
+	var buf [1]byte
+	for {
+		if _, err := rand.Read(buf[:]); err != nil {
+			panic(err) // crypto/rand failure is unrecoverable
+		}
+		if int(buf[0]) < maxAlphabetIndex {
+			return roomIDAlphabet[int(buf[0])%len(roomIDAlphabet)]
+		}
+	}
 }
