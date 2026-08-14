@@ -174,6 +174,9 @@ func TestStaticHostingServesFrontend(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "app.js"), []byte("console.log(1)"), 0o644); err != nil {
 		t.Fatalf("write asset: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(dir, "assets"), 0o755); err != nil {
+		t.Fatalf("mkdir assets: %v", err)
+	}
 
 	srv := httptest.NewServer(NewWithOptions(hub.New(), Options{StaticDir: dir}).Handler())
 	defer srv.Close()
@@ -187,6 +190,19 @@ func TestStaticHostingServesFrontend(t *testing.T) {
 	}
 	if got := getBody(t, srv.URL+"/healthz"); got != "ok" {
 		t.Fatalf("healthz body = %q", got)
+	}
+
+	// Directory listings are disabled: /assets (with or without slash)
+	// must 404 rather than enumerate the directory.
+	for _, path := range []string{"/assets", "/assets/"} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("get %s: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET %s status = %d, want 404 (no dir listing)", path, resp.StatusCode)
+		}
 	}
 
 	// The websocket endpoint must still upgrade alongside static hosting.

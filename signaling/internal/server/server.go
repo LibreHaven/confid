@@ -96,10 +96,31 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/ws", s.serveWS)
 	if s.opts.StaticDir != "" {
 		// The frontend uses hash routing (#/join/...), so serving the
-		// directory as-is needs no SPA fallback.
-		mux.Handle("/", http.FileServer(http.Dir(s.opts.StaticDir)))
+		// directory as-is needs no SPA fallback. Directory browsing is
+		// disabled (an info-disclosure smell for a public deployment).
+		mux.Handle("/", noDirListing(http.Dir(s.opts.StaticDir)))
 	}
 	return securityHeaders(mux)
+}
+
+// noDirListing serves files but refuses directory listings: the root
+// resolves to index.html, any other directory request is a 404.
+func noDirListing(root http.FileSystem) http.Handler {
+	fs := http.FileServer(root)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// http.Dir.Open applies the same path cleaning FileServer uses;
+		// stat the target and reject non-root directories outright.
+		f, err := root.Open(r.URL.Path)
+		if err == nil {
+			info, statErr := f.Stat()
+			f.Close()
+			if statErr == nil && info.IsDir() && r.URL.Path != "/" {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		fs.ServeHTTP(w, r)
+	})
 }
 
 // connLimiter tracks live connections per client IP (flood guard).
