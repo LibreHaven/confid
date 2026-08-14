@@ -114,21 +114,24 @@ export function useSession() {
     [clearHandshakeTimer, send],
   );
 
+  const sendHello = useCallback(async () => {
+    if (!channel.current || !crypto.current) {
+      return;
+    }
+    const jwk = await exportPublicKey(crypto.current.keyPair.publicKey);
+    channel.current.send(JSON.stringify({ kind: 'hello', data: JSON.stringify(jwk) }));
+  }, []);
+
   const onChannel = useCallback(
     (ch: RTCDataChannel) => {
       channel.current = ch;
+      ch.onopen = () => void sendHello();
       ch.onmessage = (e) => {
         void handleChannelMessage(String(e.data));
       };
     },
-    [handleChannelMessage],
+    [handleChannelMessage, sendHello],
   );
-
-  const sendHello = useCallback(async () => {
-    if (!channel.current || !crypto.current) return;
-    const jwk = await exportPublicKey(crypto.current.keyPair.publicKey);
-    channel.current.send(JSON.stringify({ kind: 'hello', data: JSON.stringify(jwk) }));
-  }, []);
 
   // --- Signaling protocol ---------------------------------------------------
 
@@ -177,6 +180,7 @@ export function useSession() {
       const client = new SignalingClient(signalingUrl(), {
         onCreated: (id) => send({ type: 'CREATED', roomId: id }),
         onJoined: () => send({ type: 'JOINED' }),
+        onPeerJoined: () => send({ type: 'PEER_JOINED' }),
         onSignal: (p) => void handleSignal(p),
         onPeerLeft: () => send({ type: 'PEER_LEFT' }),
         onError: (code) => send({ type: 'ERROR', code }),
@@ -193,7 +197,7 @@ export function useSession() {
     [handleSignal, send],
   );
 
-  /** Generates the local key pair and shows its fingerprint. */
+  /** Generates the local key pair, shows its fingerprint, and prepares WebRTC. */
   const startPeerSetup = useCallback(async () => {
     const keyPair = await generateKeyPair();
     crypto.current = {
@@ -202,7 +206,22 @@ export function useSession() {
       remoteFingerprint: '',
     };
     setLocalFingerprint(await fingerprintOf(keyPair.publicKey));
-  }, []);
+    if (!pc.current) {
+      // Created here, not in an effect: the idle→creating dispatch batch
+      // skips the intermediate 'ready' render, so an effect on 'ready'
+      // would never run.
+      pc.current = createPeerConnection({
+        onChannel,
+        onIceCandidate: (candidate) =>
+          signaling.current?.sendSignal({ kind: 'ice', candidate }),
+        onStateChange: (connState) => {
+          if (connState === 'disconnected' || connState === 'failed') {
+            send({ type: 'ERROR', code: `peer_${connState}` });
+          }
+        },
+      });
+    }
+  }, [onChannel, send]);
 
   const createRoom = useCallback(async () => {
     await startPeerSetup();
@@ -224,36 +243,30 @@ export function useSession() {
   // --- WebRTC wiring --------------------------------------------------------
 
   useEffect(() => {
-    if (state.phase === 'handshaking' && pc.current && !channel.current) {
+    if (
+      state.phase === 'handshaking' &&
+      state.role === 'creator' &&
+      pc.current &&
+      !channel.current
+    ) {
       // Creator side: owns the channel and initiates the offer.
+      // Channel open/sendHello is handled inside onChannel for both sides.
       const offerChannel = createDataChannel(pc.current);
-      onChannel(offerChannel);
-      offerChannel.onopen = () => void sendHello();
+      onChannel(offerChannel); // sets onopen → sendHello + onmessage
       void createOffer(pc.current!).then((offer) => {
+        // The salt must be stored locally AND sent with the offer: both
+        // peers derive the session key from the same salt.
+        const salt = randomSalt();
+        pendingSalt.current = salt;
         signaling.current?.sendSignal({
           kind: 'offer',
           sdp: offer.sdp,
-          salt: randomSalt(),
+          salt,
         });
       });
       startHandshakeTimer();
     }
-  }, [state.phase, onChannel, sendHello, startHandshakeTimer]);
-
-  useEffect(() => {
-    if (state.phase === 'ready' && !pc.current) {
-      pc.current = createPeerConnection({
-        onChannel,
-        onIceCandidate: (candidate) =>
-          signaling.current?.sendSignal({ kind: 'ice', candidate }),
-        onStateChange: (connState) => {
-          if (connState === 'disconnected' || connState === 'failed') {
-            send({ type: 'ERROR', code: `peer_${connState}` });
-          }
-        },
-      });
-    }
-  }, [state.phase, onChannel, send]);
+  }, [state.phase, onChannel, startHandshakeTimer]);
 
   useEffect(() => {
     if (state.phase === 'active') {

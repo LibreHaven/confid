@@ -25,10 +25,11 @@ const (
 
 // Server -> client
 const (
-	TypeCreated  = "created"   // room created, carries roomId
-	TypeJoined   = "joined"    // join accepted
-	TypePeerLeft = "peer_left" // the other peer disconnected
-	TypeError    = "error"     // carries error code
+	TypeCreated    = "created"    // room created, carries roomId
+	TypeJoined     = "joined"     // join accepted
+	TypePeerJoined = "peer_joined" // the other peer joined the room
+	TypePeerLeft   = "peer_left"  // the other peer disconnected
+	TypeError      = "error"      // carries error code
 )
 const (
 	ErrRoomNotFound = "room_not_found" // join: no such room

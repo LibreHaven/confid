@@ -68,6 +68,7 @@ function makeClient() {
   const events = {
     onCreated: vi.fn(),
     onJoined: vi.fn(),
+    onPeerJoined: vi.fn(),
     onSignal: vi.fn(),
     onPeerLeft: vi.fn(),
     onError: vi.fn(),
@@ -141,6 +142,7 @@ describe('SignalingClient', () => {
     const events = {
       onCreated: vi.fn(),
       onJoined: vi.fn(),
+      onPeerJoined: vi.fn(),
       onSignal: vi.fn(),
       onPeerLeft: vi.fn(),
       onError: vi.fn(),

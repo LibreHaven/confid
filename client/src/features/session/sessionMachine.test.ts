@@ -96,7 +96,7 @@ describe('session machine — guards and failure recovery', () => {
 
     const vs = drive(
       [{ type: 'PUBLIC_KEYS_READY', remoteFingerprint: 'a1 b2 c3' }, { type: 'TIMEOUT' }],
-      { phase: 'handshaking' },
+      { phase: 'handshaking', role: 'creator' },
     );
     expect(vs.phase).toBe('failed');
   });
@@ -105,7 +105,7 @@ describe('session machine — guards and failure recovery', () => {
     for (const from of [
       { phase: 'waiting', roomId: 'x', inviteUrl: 'u' },
       { phase: 'joining', roomId: 'x' },
-      { phase: 'handshaking' },
+      { phase: 'handshaking', role: 'joiner' },
       { phase: 'verifying', remoteFingerprint: 'f' },
       { phase: 'active' },
     ] as SessionState[]) {
@@ -121,7 +121,10 @@ describe('session machine — guards and failure recovery', () => {
     expect(sessionReducer({ phase: 'ready' }, { type: 'TIMEOUT' }).phase).toBe('ready');
     // VERIFY outside verifying is ignored
     expect(
-      sessionReducer({ phase: 'handshaking' }, { type: 'VERIFY', match: true }).phase,
+      sessionReducer(
+        { phase: 'handshaking', role: 'joiner' },
+        { type: 'VERIFY', match: true },
+      ).phase,
     ).toBe('handshaking');
   });
 

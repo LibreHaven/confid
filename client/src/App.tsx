@@ -161,7 +161,12 @@ function Waiting({
     <div className="space-y-5 rounded-2xl border border-slate-800 bg-slate-900 p-8 text-center">
       <p className="text-sm text-slate-400">安全会话已创建，等待对方加入</p>
       <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950 p-4">
-        <p className="font-mono text-2xl tracking-[0.3em] text-emerald-400">{roomId}</p>
+        <p
+          data-testid="room-code"
+          className="font-mono text-2xl tracking-[0.3em] text-emerald-400"
+        >
+          {roomId}
+        </p>
         <p className="mt-2 break-all text-xs text-slate-500">{inviteUrl}</p>
       </div>
       <button
@@ -208,12 +213,14 @@ function Verify({
       </div>
       <div className="flex gap-3">
         <button
+          data-testid="verify-mismatch"
           onClick={() => actions.verifyFingerprint(false)}
           className="flex-1 rounded-xl border border-red-900 py-3 font-medium text-red-400 transition hover:bg-red-950"
         >
           不一致，拒绝
         </button>
         <button
+          data-testid="verify-match"
           onClick={() => actions.verifyFingerprint(true)}
           className="flex-1 rounded-xl bg-emerald-600 py-3 font-medium text-white transition hover:bg-emerald-500"
         >
@@ -263,7 +270,11 @@ function Chat({
           </p>
         )}
         {messages.map((m) => (
-          <div key={m.id} className={`flex ${m.own ? 'justify-end' : 'justify-start'}`}>
+          <div
+            key={m.id}
+            data-testid="message"
+            className={`flex ${m.own ? 'justify-end' : 'justify-start'}`}
+          >
             <div
               className={`max-w-[75%] rounded-2xl px-4 py-2 text-sm ${
                 m.own
@@ -278,6 +289,7 @@ function Chat({
       </div>
       <div className="flex gap-2 border-t border-slate-800 p-3">
         <input
+          data-testid="message-input"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && send()}
@@ -285,6 +297,7 @@ function Chat({
           className="flex-1 rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm outline-none placeholder:text-slate-600 focus:border-emerald-500"
         />
         <button
+          data-testid="send-button"
           onClick={send}
           disabled={!draft.trim()}
           className="rounded-xl bg-emerald-600 px-5 font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"

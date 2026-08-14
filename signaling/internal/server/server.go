@@ -126,6 +126,11 @@ func (c *client) readLoop() {
 			c.room = room
 			log.Printf("room: joined %s", msg.RoomID)
 			c.Send(protocol.New(protocol.TypeJoined, msg.RoomID, "", nil))
+			// Tell the other peer that someone arrived; they can start
+			// the WebRTC offer.
+			if err := room.Relay(c, protocol.New(protocol.TypePeerJoined, "", "", nil)); err != nil {
+				log.Printf("room: notify join failed: %v", err)
+			}
 		case protocol.TypeSignal:
 			if c.room == nil {
 				c.Send(protocol.New(protocol.TypeError, "", protocol.ErrNotInRoom, nil))

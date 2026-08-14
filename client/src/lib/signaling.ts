@@ -14,8 +14,9 @@ export interface SignalingMessage {
 /** Server message types (mirror of signaling/internal/protocol). */
 export const MSG_CREATED = 'created';
 export const MSG_JOINED = 'joined';
-export const MSG_SIGNAL = 'signal';
+export const MSG_PEER_JOINED = 'peer_joined';
 export const MSG_PEER_LEFT = 'peer_left';
+export const MSG_SIGNAL = 'signal';
 export const MSG_ERROR = 'error';
 
 /** Error codes from the server. */
@@ -28,6 +29,7 @@ export const ERR_MALFORMED = 'malformed';
 export interface SignalingEvents {
   onCreated(roomId: string): void;
   onJoined(roomId: string): void;
+  onPeerJoined(): void;
   onSignal(payload: unknown): void;
   onPeerLeft(): void;
   onError(code: string): void;
@@ -146,6 +148,9 @@ export class SignalingClient {
         break;
       case MSG_SIGNAL:
         this.events.onSignal(msg.payload);
+        break;
+      case MSG_PEER_JOINED:
+        this.events.onPeerJoined();
         break;
       case MSG_PEER_LEFT:
         this.events.onPeerLeft();

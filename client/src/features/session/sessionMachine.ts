@@ -12,7 +12,7 @@ export type SessionState =
   | { phase: 'creating' } // "create" sent, awaiting "created"
   | { phase: 'waiting'; roomId: string; inviteUrl: string } // room open
   | { phase: 'joining'; roomId: string } // "join" sent, awaiting "joined"
-  | { phase: 'handshaking' } // SDP/ICE/key exchange in progress
+  | { phase: 'handshaking'; role: 'creator' | 'joiner' } // SDP/ICE/key exchange; creator owns the offer
   | { phase: 'verifying'; remoteFingerprint: string } // awaiting user check
   | { phase: 'active' } // encrypted channel confirmed
   | { phase: 'failed'; reason: string } // terminal, retryable
@@ -64,7 +64,7 @@ export function sessionReducer(state: SessionState, event: SessionEvent): Sessio
       return state;
 
     case 'waiting':
-      if (event.type === 'PEER_JOINED') return { phase: 'handshaking' };
+      if (event.type === 'PEER_JOINED') return { phase: 'handshaking', role: 'creator' };
       if (event.type === 'PEER_LEFT') return closed('peer left');
       if (event.type === 'ERROR') return fail(event.code);
       if (event.type === 'CLOSE') return closed('closed');
@@ -72,7 +72,7 @@ export function sessionReducer(state: SessionState, event: SessionEvent): Sessio
 
     case 'joining':
       if (event.type === 'JOINED' || event.type === 'OFFER_RECEIVED')
-        return { phase: 'handshaking' };
+        return { phase: 'handshaking', role: 'joiner' };
       if (event.type === 'ERROR') return fail(event.code);
       if (event.type === 'PEER_LEFT') return closed('peer left');
       return state;

@@ -17,6 +17,10 @@ npm-debug.log*
 # Coverage
 coverage/
 
+# E2E artifacts
+test-results/
+playwright-report/
+
 # Editor / OS
 .DS_Store
 Thumbs.db
