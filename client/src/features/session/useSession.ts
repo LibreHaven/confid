@@ -25,6 +25,7 @@ import {
 } from '../../lib/fileTransfer';
 import { SignalingClient } from '../../lib/signaling';
 import {
+  CHANNEL_LOW_THRESHOLD_BYTES,
   addIceCandidate,
   createAnswer,
   createDataChannel,
@@ -75,17 +76,30 @@ const ROOM_ID_PATTERN = /^[23456789abcdefghjkmnpqrstuvwxyz]{6}$/;
 // holds more than this (file-transfer flow control).
 const SEND_BACKPRESSURE_BYTES = 1 * 1024 * 1024;
 
-/** Resolves once the channel buffer drains below the low threshold. */
+/**
+ * Resolves once the channel buffer drains below the low threshold.
+ * Rejects when the channel closes while waiting, so an interrupted
+ * transfer fails loudly instead of hanging forever.
+ */
 function waitForBackpressure(channel: RTCDataChannel): Promise<void> {
   if (channel.bufferedAmount <= SEND_BACKPRESSURE_BYTES) {
     return Promise.resolve();
   }
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const onLow = () => {
-      channel.removeEventListener('bufferedamountlow', onLow);
+      cleanup();
       resolve();
     };
+    const onClose = () => {
+      cleanup();
+      reject(new Error('channel closed while waiting for backpressure'));
+    };
+    const cleanup = () => {
+      channel.removeEventListener('bufferedamountlow', onLow);
+      channel.removeEventListener('close', onClose);
+    };
     channel.addEventListener('bufferedamountlow', onLow);
+    channel.addEventListener('close', onClose);
   });
 }
 
@@ -181,7 +195,7 @@ export function useSession() {
           // Tampered or undecryptable message: drop it silently (AES-GCM
           // authentication already failed server-side of this call).
         }
-      } else if (msg.kind === FILE_META_KIND) {
+      } else if (msg.kind === FILE_META_KIND && crypto.current?.sessionKey) {
         const meta = parseFileMeta(msg.data);
         if (!meta) {
           // Malformed or oversized declaration: refuse the transfer.
@@ -201,7 +215,7 @@ export function useSession() {
             own: false,
           },
         ]);
-      } else if (msg.kind === FILE_CHUNK_KIND) {
+      } else if (msg.kind === FILE_CHUNK_KIND && crypto.current?.sessionKey) {
         const chunk = msg.data as FileChunk;
         const receiver = receivers.current.get(chunk.id);
         if (!receiver) return;
@@ -248,6 +262,11 @@ export function useSession() {
   const onChannel = useCallback(
     (ch: RTCDataChannel) => {
       channel.current = ch;
+      // Both sides must set the backpressure threshold: the creator's
+      // channel sets it in createDataChannel, but the joiner's channel
+      // (received via ondatachannel) defaults to 0 — without this, its
+      // file sends deadlock on the bufferedamountlow wait.
+      ch.bufferedAmountLowThreshold = CHANNEL_LOW_THRESHOLD_BYTES;
       ch.onopen = () => void sendHello();
       ch.onmessage = (e) => {
         void handleChannelMessage(String(e.data));
@@ -494,17 +513,27 @@ export function useSession() {
       },
     ]);
     const ch = channel.current;
-    ch.send(JSON.stringify({ kind: FILE_META_KIND, data: meta }));
-    for (let i = 0; i < chunks.length; i++) {
-      await waitForBackpressure(ch);
-      ch.send(JSON.stringify({ kind: FILE_CHUNK_KIND, data: chunks[i] }));
-      const progress = (i + 1) / chunks.length;
-      setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, progress } : m)));
+    try {
+      ch.send(JSON.stringify({ kind: FILE_META_KIND, data: meta }));
+      for (let i = 0; i < chunks.length; i++) {
+        await waitForBackpressure(ch); // rejects when the peer disconnects
+        ch.send(JSON.stringify({ kind: FILE_CHUNK_KIND, data: chunks[i] }));
+        const progress = (i + 1) / chunks.length;
+        setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, progress } : m)));
+      }
+      setMessages((prev) =>
+        prev.map((m) => (m.id === id ? { ...m, state: 'complete', progress: 1 } : m)),
+      );
+      return true;
+    } catch {
+      // Peer disconnected mid-transfer (channel send throws, or the
+      // backpressure wait rejects): surface the failure instead of an
+      // unhandled rejection.
+      setMessages((prev) =>
+        prev.map((m) => (m.id === id ? { ...m, state: 'failed' as const } : m)),
+      );
+      return false;
     }
-    setMessages((prev) =>
-      prev.map((m) => (m.id === id ? { ...m, state: 'complete', progress: 1 } : m)),
-    );
-    return true;
   }, []);
 
   const retry = useCallback(() => {

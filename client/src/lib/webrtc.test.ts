@@ -1,5 +1,6 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import {
+  CHANNEL_LOW_THRESHOLD_BYTES,
   DATA_CHANNEL_LABEL,
   addIceCandidate,
   createAnswer,
@@ -129,5 +130,13 @@ describe('SDP helpers', () => {
       ordered: true,
     });
     expect(ch.label).toBe(DATA_CHANNEL_LABEL);
+  });
+
+  it('createDataChannel sets the backpressure threshold', () => {
+    // Regression: without the threshold, bufferedamountlow never fires on
+    // a channel whose buffer stays non-empty → file sends deadlock.
+    const pc = new MockPeerConnection({}) as unknown as RTCPeerConnection;
+    const ch = createDataChannel(pc);
+    expect(ch.bufferedAmountLowThreshold).toBe(CHANNEL_LOW_THRESHOLD_BYTES);
   });
 });
