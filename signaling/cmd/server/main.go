@@ -20,6 +20,12 @@ func main() {
 	staticDir := flag.String("static", "", "serve the built frontend from this directory")
 	flag.Parse()
 
+	// Serverless platforms (Cloud Run, etc.) inject the listen port via
+	// the PORT env var; it wins over -addr.
+	if port := os.Getenv("PORT"); port != "" {
+		*addr = ":" + port
+	}
+
 	h := hub.New()
 	// Reclaim rooms whose invite expired before anyone joined.
 	stopCleaner := make(chan struct{})
