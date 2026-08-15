@@ -34,7 +34,11 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    *addr,
-		Handler: server.NewWithOptions(h, server.Options{StaticDir: *staticDir}).Handler(),
+		Handler: server.NewWithOptions(h, server.Options{
+			StaticDir:   *staticDir,
+			TurnAPIKey:  os.Getenv("METERED_TURN_API_KEY"),
+			TurnAPIBase: os.Getenv("METERED_TURN_API_BASE"),
+		}).Handler(),
 		// Slowloris guard: reject headers that take too long to arrive.
 		ReadHeaderTimeout: 10 * time.Second,
 	}

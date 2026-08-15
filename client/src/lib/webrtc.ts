@@ -2,15 +2,15 @@
 // Responsibilities: SDP offer/answer exchange, ICE candidate forwarding,
 // and DataChannel lifecycle — all signaling I/O stays outside this module.
 
-// ICE_SERVERS is the public STUN configuration. STUN only discovers the
-// public address; no media or message data ever touches these servers.
+// ICE_SERVERS is the default public STUN configuration. STUN only discovers
+// the public address; no media or message data ever touches these servers.
 // STUN list: every entry is verified with a real RFC 5389 binding probe
 // (2026-08-15: stun.l.google.com OK, stun1.l.google.com OK,
 // stun.miwifi.com OK — mainland China reachability). International first,
 // mainland China last. Trickle ICE sends each candidate as it arrives, so
-// extra servers cost nothing — they only add candidates. STUN only
-// discovers the public address; no media or message data touches them.
-const ICE_SERVERS: RTCIceServer[] = [
+// extra servers cost nothing — they only add candidates.
+// Exported so the session layer can merge TURN credentials after them.
+export const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   // Mainland China: google UDP is unreachable from CN mobile networks.
@@ -49,9 +49,14 @@ export function candidateType(candidate: string): 'host' | 'srflx' | 'relay' | '
 /**
  * Creates a peer connection wired to the given events.
  * The caller owns the signaling transport (offer/answer/ICE relay).
+ * iceServers defaults to the public STUN list; pass the merge of TURN
+ * credentials (fetched at session start) to add relay candidates.
  */
-export function createPeerConnection(events: PeerEvents): RTCPeerConnection {
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+export function createPeerConnection(
+  events: PeerEvents,
+  iceServers: RTCIceServer[] = ICE_SERVERS,
+): RTCPeerConnection {
+  const pc = new RTCPeerConnection({ iceServers });
   pc.onicecandidate = (e) => {
     if (e.candidate) {
       events.onIceCandidate(e.candidate.toJSON());

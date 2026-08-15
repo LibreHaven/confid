@@ -12,6 +12,9 @@ export default defineConfig({
         target: 'ws://localhost:8787',
         ws: true,
       },
+      '/turn-credentials': {
+        target: 'http://localhost:8787',
+      },
     },
   },
   test: {

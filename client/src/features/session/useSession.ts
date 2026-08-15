@@ -26,6 +26,7 @@ import {
 import { SignalingClient } from '../../lib/signaling';
 import {
   CHANNEL_LOW_THRESHOLD_BYTES,
+  ICE_SERVERS,
   addIceCandidate,
   candidateType,
   createAnswer,
@@ -413,6 +414,28 @@ export function useSession() {
     [handleSignal, send],
   );
 
+  /**
+   * Fetches TURN relay credentials from the same-origin signaling server
+   * (/turn-credentials) so relay candidates exist for CGNAT/symmetric-NAT
+   * peers. Never rejects: any failure (endpoint disabled, network,
+   * timeout) degrades to the STUN-only default.
+   */
+  const fetchTurnCredentials = useCallback(async (): Promise<
+    RTCIceServer[] | undefined
+  > => {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 3000);
+      const resp = await fetch('/turn-credentials', { signal: ctrl.signal });
+      clearTimeout(timer);
+      if (!resp.ok) return undefined;
+      const data = (await resp.json()) as { iceServers?: RTCIceServer[] };
+      return data.iceServers?.length ? data.iceServers : undefined;
+    } catch {
+      return undefined;
+    }
+  }, []);
+
   /** Generates the local key pair, shows its fingerprint, and prepares WebRTC. */
   const startPeerSetup = useCallback(async () => {
     const keyPair = await generateKeyPair();
@@ -426,31 +449,35 @@ export function useSession() {
       // Created here, not in an effect: the idle→creating dispatch batch
       // skips the intermediate 'ready' render, so an effect on 'ready'
       // would never run.
-      pc.current = createPeerConnection({
-        onChannel,
-        onIceCandidate: (candidate) => {
-          const type = candidateType(candidate.candidate ?? '');
-          pushDebug(`candidate:${type}`, candidate.candidate);
-          setDebug((prev) => ({
-            ...prev,
-            ice: { ...prev.ice, [type]: prev.ice[type] + 1 },
-          }));
-          signaling.current?.sendSignal({ kind: 'ice', candidate });
+      const turnIce = await fetchTurnCredentials();
+      pc.current = createPeerConnection(
+        {
+          onChannel,
+          onIceCandidate: (candidate) => {
+            const type = candidateType(candidate.candidate ?? '');
+            pushDebug(`candidate:${type}`, candidate.candidate);
+            setDebug((prev) => ({
+              ...prev,
+              ice: { ...prev.ice, [type]: prev.ice[type] + 1 },
+            }));
+            signaling.current?.sendSignal({ kind: 'ice', candidate });
+          },
+          onStateChange: (connState) => {
+            setDebug((prev) => ({ ...prev, connectionState: connState }));
+            pushDebug(`ice_state:${connState}`);
+            if (connState === 'disconnected' || connState === 'failed') {
+              send({ type: 'ERROR', code: `peer_${connState}` });
+            }
+          },
+          onGatheringState: (gatheringState) => {
+            setDebug((prev) => ({ ...prev, gatheringState }));
+            pushDebug(`gathering:${gatheringState}`);
+          },
         },
-        onStateChange: (connState) => {
-          setDebug((prev) => ({ ...prev, connectionState: connState }));
-          pushDebug(`ice_state:${connState}`);
-          if (connState === 'disconnected' || connState === 'failed') {
-            send({ type: 'ERROR', code: `peer_${connState}` });
-          }
-        },
-        onGatheringState: (gatheringState) => {
-          setDebug((prev) => ({ ...prev, gatheringState }));
-          pushDebug(`gathering:${gatheringState}`);
-        },
-      });
+        turnIce ? [...ICE_SERVERS, ...turnIce] : ICE_SERVERS,
+      );
     }
-  }, [onChannel, send]);
+  }, [fetchTurnCredentials, onChannel, send]);
 
   const createRoom = useCallback(async () => {
     await startPeerSetup();

@@ -55,6 +55,12 @@ type Options struct {
 	// MaxConnsPerIP caps concurrent websocket connections per client IP;
 	// zero uses defaultMaxConnsPerIP.
 	MaxConnsPerIP int
+	// TurnAPIKey + TurnAPIBase (Metered REST API) enable GET
+	// /turn-credentials for CGNAT/symmetric-NAT peers. The key is held
+	// server-side only; empty values disable the endpoint (503; the
+	// frontend degrades to STUN-only).
+	TurnAPIKey  string
+	TurnAPIBase string
 }
 
 // Server hosts the signaling endpoint.
@@ -62,6 +68,7 @@ type Server struct {
 	hub     *hub.Hub
 	opts    Options
 	limiter *connLimiter
+	turn    *turnCredentials
 }
 
 // New creates a Server backed by the given hub.
@@ -81,6 +88,9 @@ func NewWithOptions(h *hub.Hub, opts Options) *Server {
 		opts.MaxConnsPerIP = defaultMaxConnsPerIP
 	}
 	s.opts = opts
+	if tc := newTurnCredentials(opts.TurnAPIKey, opts.TurnAPIBase); tc != nil {
+		s.turn = tc
+	}
 	return s
 }
 
@@ -94,6 +104,7 @@ func (s *Server) Handler() http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/ws", s.serveWS)
+	mux.HandleFunc("/turn-credentials", s.serveTurnCredentials)
 	if s.opts.StaticDir != "" {
 		// The frontend uses hash routing (#/join/...), so serving the
 		// directory as-is needs no SPA fallback. Directory browsing is

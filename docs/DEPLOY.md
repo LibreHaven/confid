@@ -65,6 +65,25 @@ HSTS 由反代配置（或 Confid 直接 TLS 时自动发送）。
 | HSTS | 仅当 Confid 自己终止 TLS 时发送（反代场景由反代配置） |
 | Slowloris | ReadHeaderTimeout 10s |
 | 邀请过期 | 房间 30 分钟无人加入自动回收（后台 cleaner，1 分钟粒度） |
+| TURN 中继 | 可选：`GET /turn-credentials` 发放 Metered TURN 凭据（CGNAT/对称 NAT 场景必需），每 IP 限流防额度盗刷 |
+
+## TURN 配置（可选，推荐）
+
+手机流量/企业网络常为对称 NAT（CGNAT），STUN 打洞失败时 WebRTC 无法直连——需要 TURN 中继。
+
+```bash
+# 1. 注册 https://www.metered.ca/stun-turn（免费计划 500MB/月，无信用卡）
+#    Dashboard → Create TURN account → 复制 API Key
+# 2. 部署时注入环境变量（API Key 只存服务端，不进仓库/前端）：
+docker run -d --name confid -p 8787:8787 \
+  -e METERED_TURN_API_KEY=<your-api-key> \
+  -e METERED_TURN_API_BASE=https://confid.metered.live \
+  confid
+```
+
+- 前端会话建立前请求 `/turn-credentials`，服务端经 Metered REST API 换取凭据（60s 缓存）；失败自动降级纯 STUN（不阻塞会话）
+- **安全**：API Key 可创建/删除凭据，只存服务端；浏览器拿到的凭据仅用于 ICE 中继（消息内容始终 E2EE）；端点每 IP 限流（10 次/分钟）防免费额度被刷爆（额度耗尽 = TURN 停服）
+- 未配置时端点返回 503，前端静默降级
 
 ## 运维注意
 
