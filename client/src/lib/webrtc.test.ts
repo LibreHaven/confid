@@ -50,7 +50,11 @@ describe('createPeerConnection', () => {
       onStateChange: vi.fn(),
     });
     const pc = MockPeerConnection.instances[0]!;
-    expect(pc.iceServers).toEqual([{ urls: 'stun:stun.l.google.com:19302' }]);
+    expect(pc.iceServers).toEqual([
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun.miwifi.com:3478' },
+    ]);
   });
 
   it('forwards real ICE candidates and drops null end-of-candidates', () => {

@@ -4,7 +4,18 @@
 
 // ICE_SERVERS is the public STUN configuration. STUN only discovers the
 // public address; no media or message data ever touches these servers.
-const ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+// STUN list: every entry is verified with a real RFC 5389 binding probe
+// (2026-08-15: stun.l.google.com OK, stun1.l.google.com OK,
+// stun.miwifi.com OK — mainland China reachability). International first,
+// mainland China last. Trickle ICE sends each candidate as it arrives, so
+// extra servers cost nothing — they only add candidates. STUN only
+// discovers the public address; no media or message data touches them.
+const ICE_SERVERS: RTCIceServer[] = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  // Mainland China: google UDP is unreachable from CN mobile networks.
+  { urls: 'stun:stun.miwifi.com:3478' },
+];
 
 // DATA_CHANNEL_LABEL identifies the message channel within a connection.
 export const DATA_CHANNEL_LABEL = 'confid-messages';
