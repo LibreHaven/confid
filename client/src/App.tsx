@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useSession, type ChatMessage } from './features/session/useSession';
 import type { SessionState } from './features/session/sessionMachine';
 import { MAX_FILE_BYTES } from './lib/fileTransfer';
+import { useDebugMode } from './lib/debugMode';
+import { DebugPanel } from './components/DebugPanel';
 
 // Interaction contract (see docs/spec.md conventions):
 //   home    --[create]--> creating --[created]--> waiting --[peer joined]--> handshaking
@@ -11,8 +13,9 @@ import { MAX_FILE_BYTES } from './lib/fileTransfer';
 //   failed/closed --[retry]--> idle(home)
 
 export default function App() {
-  const { state, messages, localFingerprint, actions } = useSession();
+  const { state, messages, localFingerprint, debug, actions } = useSession();
   const { joinRoom, retry } = actions;
+  const { debug: debugMode, toggle: toggleDebug } = useDebugMode();
 
   // Join on invite links (#/join/<roomId>), including hash navigation to a
   // NEW link from a finished session in the same tab.
@@ -51,8 +54,11 @@ export default function App() {
             messages={messages}
             localFingerprint={localFingerprint}
             actions={actions}
+            debugMode={debugMode}
+            toggleDebug={toggleDebug}
           />
         </main>
+        {debugMode && <DebugPanel debug={debug} state={state} />}
         <footer className="mt-8 text-center text-xs text-slate-600">
           消息仅在两台设备间传输，服务器不存储任何内容
         </footer>
@@ -66,13 +72,22 @@ interface ViewProps {
   messages: ChatMessage[];
   localFingerprint: string | null;
   actions: ReturnType<typeof useSession>['actions'];
+  debugMode: boolean;
+  toggleDebug: () => void;
 }
 
-function View({ state, messages, localFingerprint, actions }: ViewProps) {
+function View({
+  state,
+  messages,
+  localFingerprint,
+  actions,
+  debugMode,
+  toggleDebug,
+}: ViewProps) {
   switch (state.phase) {
     case 'idle':
     case 'ready':
-      return <Home actions={actions} />;
+      return <Home actions={actions} debugMode={debugMode} toggleDebug={toggleDebug} />;
     case 'creating':
       return <StatusCard title="正在创建安全会话…" />;
     case 'waiting':
@@ -112,7 +127,15 @@ function View({ state, messages, localFingerprint, actions }: ViewProps) {
   }
 }
 
-function Home({ actions }: { actions: ViewProps['actions'] }) {
+function Home({
+  actions,
+  debugMode,
+  toggleDebug,
+}: {
+  actions: ViewProps['actions'];
+  debugMode: boolean;
+  toggleDebug: () => void;
+}) {
   const [roomInput, setRoomInput] = useState('');
 
   const join = () => {
@@ -153,6 +176,15 @@ function Home({ actions }: { actions: ViewProps['actions'] }) {
           加入会话
         </button>
       </div>
+      <button
+        onClick={toggleDebug}
+        aria-pressed={debugMode}
+        className={`text-xs underline-offset-2 transition hover:underline ${
+          debugMode ? 'text-emerald-500' : 'text-slate-600'
+        }`}
+      >
+        调试模式：{debugMode ? '开' : '关'}
+      </button>
     </div>
   );
 }

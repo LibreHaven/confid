@@ -27,6 +27,7 @@ import { SignalingClient } from '../../lib/signaling';
 import {
   CHANNEL_LOW_THRESHOLD_BYTES,
   addIceCandidate,
+  candidateType,
   createAnswer,
   createDataChannel,
   createOffer,
@@ -108,10 +109,54 @@ const signalingUrl = () => {
   return `${proto}://${window.location.host}/ws`;
 };
 
+/** One structured diagnostic event for the debug panel. */
+export interface DebugEvent {
+  t: number; // relative milliseconds since session hook mount
+  event: string;
+  detail?: string;
+}
+
+/** ICE candidate tally — answers "did NAT discovery even produce candidates?". */
+export interface IceTally {
+  host: number;
+  srflx: number;
+  relay: number;
+  unknown: number;
+}
+
+/** Diagnostics surfaced to the debug panel (debug mode only). */
+export interface SessionDebug {
+  events: DebugEvent[];
+  ice: IceTally;
+  connectionState: string;
+  gatheringState: string;
+}
+
+const EMPTY_ICE: IceTally = { host: 0, srflx: 0, relay: 0, unknown: 0 };
+const MAX_DEBUG_EVENTS = 50;
+
 export function useSession() {
   const [state, dispatch] = useReducer(sessionReducer, initialState);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [localFingerprint, setLocalFingerprint] = useState<string | null>(null);
+  const [debug, setDebug] = useState<SessionDebug>({
+    events: [],
+    ice: EMPTY_ICE,
+    connectionState: 'new',
+    gatheringState: 'new',
+  });
+  const debugStart = useRef(performance.now());
+
+  // Records one structured protocol/ICE event (ring buffer, newest last).
+  const pushDebug = useCallback((event: string, detail?: string) => {
+    setDebug((prev) => ({
+      ...prev,
+      events: [
+        ...prev.events.slice(-(MAX_DEBUG_EVENTS - 1)),
+        { t: Math.round(performance.now() - debugStart.current), event, detail },
+      ],
+    }));
+  }, []);
 
   // Mirrors the latest state for stable callbacks (transport handlers must
   // not be recreated per render, yet need to read the current phase/role).
@@ -129,7 +174,13 @@ export function useSession() {
   // In-flight inbound file transfers, keyed by the file id from the meta.
   const receivers = useRef<Map<string, FileReceiver>>(new Map());
 
-  const send = useCallback((event: SessionEvent) => dispatch(event), []);
+  const send = useCallback(
+    (event: SessionEvent) => {
+      pushDebug(`dispatch:${event.type}`);
+      dispatch(event);
+    },
+    [dispatch, pushDebug],
+  );
 
   const clearHandshakeTimer = useCallback(() => {
     if (handshakeTimer.current !== null) {
@@ -157,6 +208,12 @@ export function useSession() {
         msg = JSON.parse(raw) as { kind: string; data?: unknown };
       } catch {
         return; // malformed DataChannel frame: drop, never crash the session
+      }
+      // file-chunk frames are high-frequency (one per 64KB) and carry no
+      // diagnostic value beyond the message-level progress — skip them so
+      // the debug ring buffer and re-renders don't grow with transfer size.
+      if (msg.kind !== FILE_CHUNK_KIND) {
+        pushDebug(`frame:${msg.kind}`);
       }
       if (msg.kind === 'hello' && crypto.current && !crypto.current.sessionKey) {
         try {
@@ -248,16 +305,17 @@ export function useSession() {
         }
       }
     },
-    [clearHandshakeTimer, send],
+    [clearHandshakeTimer, pushDebug, send],
   );
 
   const sendHello = useCallback(async () => {
     if (!channel.current || !crypto.current) {
       return;
     }
+    pushDebug('hello:send');
     const jwk = await exportPublicKey(crypto.current.keyPair.publicKey);
     channel.current.send(JSON.stringify({ kind: 'hello', data: JSON.stringify(jwk) }));
-  }, []);
+  }, [pushDebug]);
 
   const onChannel = useCallback(
     (ch: RTCDataChannel) => {
@@ -267,12 +325,15 @@ export function useSession() {
       // (received via ondatachannel) defaults to 0 — without this, its
       // file sends deadlock on the bufferedamountlow wait.
       ch.bufferedAmountLowThreshold = CHANNEL_LOW_THRESHOLD_BYTES;
-      ch.onopen = () => void sendHello();
+      ch.onopen = () => {
+        pushDebug('channel:open');
+        void sendHello();
+      };
       ch.onmessage = (e) => {
         void handleChannelMessage(String(e.data));
       };
     },
-    [handleChannelMessage, sendHello],
+    [handleChannelMessage, pushDebug, sendHello],
   );
 
   // --- Signaling protocol ---------------------------------------------------
@@ -367,12 +428,25 @@ export function useSession() {
       // would never run.
       pc.current = createPeerConnection({
         onChannel,
-        onIceCandidate: (candidate) =>
-          signaling.current?.sendSignal({ kind: 'ice', candidate }),
+        onIceCandidate: (candidate) => {
+          const type = candidateType(candidate.candidate ?? '');
+          pushDebug(`candidate:${type}`, candidate.candidate);
+          setDebug((prev) => ({
+            ...prev,
+            ice: { ...prev.ice, [type]: prev.ice[type] + 1 },
+          }));
+          signaling.current?.sendSignal({ kind: 'ice', candidate });
+        },
         onStateChange: (connState) => {
+          setDebug((prev) => ({ ...prev, connectionState: connState }));
+          pushDebug(`ice_state:${connState}`);
           if (connState === 'disconnected' || connState === 'failed') {
             send({ type: 'ERROR', code: `peer_${connState}` });
           }
+        },
+        onGatheringState: (gatheringState) => {
+          setDebug((prev) => ({ ...prev, gatheringState }));
+          pushDebug(`gathering:${gatheringState}`);
         },
       });
     }
@@ -547,6 +621,7 @@ export function useSession() {
     state,
     messages,
     localFingerprint,
+    debug,
     actions: { createRoom, joinRoom, sendMessage, sendFile, verifyFingerprint, retry },
   };
 }

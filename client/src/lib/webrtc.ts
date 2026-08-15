@@ -32,6 +32,18 @@ export interface PeerEvents {
   onChannel(channel: RTCDataChannel): void;
   onIceCandidate(candidate: RTCIceCandidateInit): void;
   onStateChange(state: RTCPeerConnectionState): void;
+  onGatheringState?(state: RTCIceGatheringState): void;
+}
+
+/**
+ * Parses the candidate type from an ICE candidate string ("typ host",
+ * "typ srflx", "typ relay", ...). Used for the debug panel so a failed
+ * session shows whether NAT discovery even produced candidates.
+ */
+export function candidateType(candidate: string): 'host' | 'srflx' | 'relay' | 'unknown' {
+  const m = / typ (host|srflx|relay)/.exec(candidate);
+  if (m) return m[1] as 'host' | 'srflx' | 'relay';
+  return 'unknown';
 }
 
 /**
@@ -45,6 +57,11 @@ export function createPeerConnection(events: PeerEvents): RTCPeerConnection {
       events.onIceCandidate(e.candidate.toJSON());
     }
   };
+  if (events.onGatheringState) {
+    pc.onicegatheringstatechange = () => {
+      events.onGatheringState?.(pc.iceGatheringState);
+    };
+  }
   pc.onconnectionstatechange = () => events.onStateChange(pc.connectionState);
   pc.ondatachannel = (e) => events.onChannel(e.channel);
   return pc;

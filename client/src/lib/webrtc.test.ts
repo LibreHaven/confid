@@ -3,6 +3,7 @@ import {
   CHANNEL_LOW_THRESHOLD_BYTES,
   DATA_CHANNEL_LABEL,
   addIceCandidate,
+  candidateType,
   createAnswer,
   createDataChannel,
   createOffer,
@@ -142,5 +143,30 @@ describe('SDP helpers', () => {
     const pc = new MockPeerConnection({}) as unknown as RTCPeerConnection;
     const ch = createDataChannel(pc);
     expect(ch.bufferedAmountLowThreshold).toBe(CHANNEL_LOW_THRESHOLD_BYTES);
+  });
+
+  describe('candidateType', () => {
+    it('parses host/srflx/relay from real candidate strings', () => {
+      expect(
+        candidateType(
+          'candidate:1 1 udp 2122260223 192.168.1.5 54321 typ host generation 0',
+        ),
+      ).toBe('host');
+      expect(
+        candidateType(
+          'candidate:2 1 udp 1686052607 203.0.113.9 65000 typ srflx raddr 0.0.0.0 rport 0 generation 0',
+        ),
+      ).toBe('srflx');
+      expect(
+        candidateType(
+          'candidate:3 1 udp 1694498815 15.235.47.158 3478 typ relay raddr 192.168.1.5 rport 54321',
+        ),
+      ).toBe('relay');
+    });
+
+    it('returns unknown for malformed input', () => {
+      expect(candidateType('')).toBe('unknown');
+      expect(candidateType('candidate:1 1 udp 123 1.2.3.4 5 typ')).toBe('unknown');
+    });
   });
 });
